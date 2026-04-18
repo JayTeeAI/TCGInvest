@@ -61,3 +61,23 @@ logs/
 workspace/venv/
 etb/
 workspace/google-credentials.json
+
+# Workspace runtime/data files — not source code
+workspace/backups/
+workspace/*.xlsx
+workspace/ebay-price-cache.json
+workspace/config.json
+workspace/*.openclaw/
+workspace/first_run_v1_working.py
+workspace/first_run_v2.py
+workspace/first_run_v2_backup.py
+workspace/first_run_v3_backup*.py
+workspace/2026-*.xlsx
+workspace/AGENTS.md
+workspace/BOOTSTRAP.md
+workspace/HEARTBEAT.md
+workspace/IDENTITY.md
+workspace/SOUL.md
+workspace/TOOLS.md
+workspace/USER.md
+db/tracker.db
