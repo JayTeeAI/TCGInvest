@@ -60,3 +60,4 @@ qqbot/
 logs/
 workspace/venv/
 etb/
+workspace/google-credentials.json
