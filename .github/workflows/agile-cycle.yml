@@ -18,9 +18,9 @@ jobs:
 
       - name: Install Python dependencies
         run: |
-          python3 -m pip install --upgrade pip --quiet
-          pip install -r api/requirements.txt --quiet
-          pip install flake8 pytest-asyncio --quiet
+          python3 -m pip install --upgrade pip --quiet --break-system-packages
+          pip install -r api/requirements.txt --quiet --break-system-packages
+          pip install flake8 pytest-asyncio --quiet --break-system-packages
 
       - name: Install Node dependencies
         working-directory: frontend
