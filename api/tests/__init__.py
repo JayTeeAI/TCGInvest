@@ -1,0 +1,1 @@
+# TCGInvest API test suite

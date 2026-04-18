@@ -1,0 +1,101 @@
+name: TCGInvest Agile Cycle
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["main", "staging"]
+
+jobs:
+  ci:
+    name: Lint, Test & Notify
+    runs-on: [self-hosted, paperclip]
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install fastapi uvicorn psycopg2-binary python-jose python-dotenv \
+                      httpx pytest pytest-asyncio pydantic flake8 2>/dev/null || true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Node dependencies
+        working-directory: frontend
+        run: npm ci --prefer-offline
+
+      - name: Lint — Python (flake8)
+        run: |
+          flake8 api/main.py --max-line-length=120 \
+            --ignore=E501,W503,E302,E303,W291,W293 \
+            --exclude=api/__pycache__ || true
+
+      - name: Lint — Next.js (eslint)
+        working-directory: frontend
+        run: npm run lint || true
+
+      - name: Run pytest
+        id: pytest
+        run: |
+          if [ -d "api/tests" ] && [ "$(ls -A api/tests/)" ]; then
+            python -m pytest api/tests/ -v --tb=short
+            echo "test_status=passed" >> $GITHUB_OUTPUT
+          else
+            echo "test_status=skipped" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Notify n8n
+        if: always()
+        run: |
+          STATUS="${{ job.status }}"
+          BRANCH="${{ github.ref_name }}"
+          COMMIT="${{ github.sha }}"
+          SHORT="${COMMIT:0:7}"
+          ACTOR="${{ github.actor }}"
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          EMOJI=$([ "$STATUS" = "success" ] && echo "\u2705" || echo "\u274c")
+
+          curl -s -X POST http://100.107.74.24:5678/webhook/tcg-ci-result \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"status\": \"$STATUS\",
+              \"branch\": \"$BRANCH\",
+              \"commit\": \"$COMMIT\",
+              \"commit_short\": \"$SHORT\",
+              \"actor\": \"$ACTOR\",
+              \"run_url\": \"$RUN_URL\",
+              \"emoji\": \"$EMOJI\",
+              \"pytest\": \"${{ steps.pytest.outputs.test_status }}\"
+            }" && echo "n8n notified" || echo "n8n notify failed (non-fatal)"
+
+      - name: Job Summary
+        if: always()
+        run: |
+          STATUS="${{ job.status }}"
+          SHORT="${{ github.sha }}"
+          SHORT="${SHORT:0:7}"
+          EMOJI=$([ "$STATUS" = "success" ] && echo "\u2705" || echo "\u274c")
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## $EMOJI CI: $STATUS
+          | | |
+          |---|---|
+          | Branch | \`${{ github.ref_name }}\` |
+          | Commit | \`$SHORT\` |
+          | Actor  | ${{ github.actor }} |
+          | Pytest | ${{ steps.pytest.outputs.test_status }} |
+          EOF

@@ -1,0 +1,62 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# Node / Next.js
+node_modules/
+frontend/.next/
+frontend/out/
+*.tsbuildinfo
+
+# Secrets — NEVER commit
+.env
+.env.local
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Backups
+*.bak
+*.bak_*
+*.backup_*
+*.clobbered.*
+
+# PM2
+.pm2/
+
+# Editor
+.vscode/
+.idea/
+
+# Openclaw runtime state — not source code
+openclaw.json
+openclaw.json.*
+agents/
+memory/
+identity/
+devices/
+canvas/
+completions/
+exec-approvals.json
+update-check.json
+tasks/
+telegram/
+qqbot/
+logs/
+workspace/venv/
+etb/
