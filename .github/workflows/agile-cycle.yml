@@ -24,7 +24,9 @@ jobs:
 
       - name: Install Node dependencies
         working-directory: frontend
-        run: npm ci --prefer-offline
+        run: |
+          rm -rf node_modules
+          npm install --prefer-offline --no-audit --no-fund 2>&1 | tail -5
 
       - name: Lint — Python (flake8)
         run: |
@@ -52,20 +54,12 @@ jobs:
           ACTOR="${{ github.actor }}"
           RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           PYTEST="${{ steps.pytest.outputs.test_status }}"
-          EMOJI=$([ "$STATUS" = "success" ] && echo "✅" || echo "❌")
+          EMOJI=$([ "$STATUS" = "success" ] && echo "\u2705" || echo "\u274c")
 
           curl -s -X POST http://100.107.74.24:5678/webhook/tcg-ci-result \
             -H "Content-Type: application/json" \
-            -d "{
-              \"status\": \"$STATUS\",
-              \"branch\": \"$BRANCH\",
-              \"commit\": \"$COMMIT\",
-              \"commit_short\": \"$SHORT\",
-              \"actor\": \"$ACTOR\",
-              \"run_url\": \"$RUN_URL\",
-              \"emoji\": \"$EMOJI\",
-              \"pytest\": \"${PYTEST:-skipped}\"
-            }" && echo "n8n notified" || echo "n8n notify failed (non-fatal)"
+            -d "{\"status\":\"$STATUS\",\"branch\":\"$BRANCH\",\"commit\":\"$COMMIT\",\"commit_short\":\"$SHORT\",\"actor\":\"$ACTOR\",\"run_url\":\"$RUN_URL\",\"emoji\":\"$EMOJI\",\"pytest\":\"${PYTEST:-skipped}\"}" \
+            && echo "n8n notified" || echo "n8n notify failed (non-fatal)"
 
       - name: Job Summary
         if: always()
@@ -73,7 +67,7 @@ jobs:
           STATUS="${{ job.status }}"
           SHORT="${{ github.sha }}"
           SHORT="${SHORT:0:7}"
-          EMOJI=$([ "$STATUS" = "success" ] && echo "✅" || echo "❌")
+          EMOJI=$([ "$STATUS" = "success" ] && echo "\u2705" || echo "\u274c")
           cat >> $GITHUB_STEP_SUMMARY << SUMMARY
           ## $EMOJI CI: $STATUS
           | | |
