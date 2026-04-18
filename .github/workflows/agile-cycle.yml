@@ -56,7 +56,7 @@ jobs:
           PYTEST="${{ steps.pytest.outputs.test_status }}"
           EMOJI=$([ "$STATUS" = "success" ] && echo "\u2705" || echo "\u274c")
 
-          curl -s -X POST http://100.107.74.24:5678/webhook/tcg-ci-result \
+          curl -s -X POST http://100.107.74.24:5678/webhook/ci-result \
             -H "Content-Type: application/json" \
             -d "{\"status\":\"$STATUS\",\"branch\":\"$BRANCH\",\"commit\":\"$COMMIT\",\"commit_short\":\"$SHORT\",\"actor\":\"$ACTOR\",\"run_url\":\"$RUN_URL\",\"emoji\":\"$EMOJI\",\"pytest\":\"${PYTEST:-skipped}\"}" \
             && echo "n8n notified" || echo "n8n notify failed (non-fatal)"
