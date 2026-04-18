@@ -1,0 +1,302 @@
+import { getSets, getSetHistory } from "@/lib/api"
+import { getUser } from "@/lib/auth"
+import { Disclaimer } from "@/components/Disclaimer"
+import { SetPageClient } from "@/components/sets/SetPageClient"
+import SetAlertButton from "@/components/alerts/SetAlertButton"
+import Link from "next/link"
+import { notFound } from "next/navigation"
+import type { Metadata } from "next"
+
+export const revalidate = 3600
+
+function toSlug(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/s&v/gi, "sandv")
+    .replace(/&/g, "and")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/(^-|-$)/g, "")
+}
+
+function formatGBP(value: number | null): string {
+  if (value == null) return "—"
+  return new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP", minimumFractionDigits: 2 }).format(value)
+}
+
+function recColor(value: string | null): string {
+  switch (value) {
+    case "Strong Buy":  return "bg-green-600 text-white"
+    case "Buy":         return "bg-green-900 text-green-300"
+    case "Accumulate":  return "bg-blue-900 text-blue-300"
+    case "Hold":        return "bg-slate-700 text-slate-300"
+    case "Reduce":      return "bg-orange-900 text-orange-300"
+    case "Sell":        return "bg-red-900 text-red-300"
+    case "Overvalued":  return "bg-red-700 text-white"
+    default:            return "bg-slate-700 text-slate-400"
+  }
+}
+
+function scoreColor(value: number | null): string {
+  if (value == null) return "bg-slate-700 text-slate-300"
+  if (value >= 16) return "bg-green-900 text-green-300"
+  if (value >= 12) return "bg-blue-900 text-blue-300"
+  if (value >= 8)  return "bg-yellow-900 text-yellow-300"
+  return "bg-red-900 text-red-300"
+}
+
+export async function generateMetadata({ params }: { params: Promise<{ slug: string }> }): Promise<Metadata> {
+  const { slug } = await params
+  const data = await getSets().catch(() => ({ sets: [] }))
+  const set = (data.sets || []).find((s: any) => toSlug(s.name) === slug)
+  if (!set) return { title: "Set Not Found | TCG Invest" }
+  const price = set.bb_price_gbp ? formatGBP(set.bb_price_gbp) : "tracked"
+  const rec = set.recommendation ?? "tracked"
+  return {
+    title: `${set.name} Booster Box Price & Investment Score 2026`,
+    description: `${set.name} booster box current price is ${price}. AI investment score: ${set.decision_score ?? "—"}/20 — ${rec}. Track price history, box %, and investment signals. Updated monthly.`,
+    keywords: [
+      `${set.name.toLowerCase()} booster box price`,
+      `${set.name.toLowerCase()} booster box investment`,
+      `${set.name.toLowerCase()} sealed price uk`,
+      `${set.name.toLowerCase()} price tracker`,
+      "pokemon booster box investment",
+      "pokemon sealed investment uk",
+    ],
+    alternates: { canonical: `https://tcginvest.uk/sets/${slug}` },
+    openGraph: {
+      title: `${set.name} Booster Box Price & Investment Score 2026`,
+      description: `Current price ${price} · AI score ${set.decision_score ?? "—"}/20 · ${rec}`,
+      url: `https://tcginvest.uk/sets/${slug}`,
+      images: [{ url: "/og-tracker.png", width: 1200, height: 630, alt: `${set.name} Investment Tracker` }],
+    },
+    twitter: {
+      card: "summary_large_image",
+      title: `${set.name} Booster Box Price Tracker`,
+      description: `Current price ${price} · AI score ${set.decision_score ?? "—"}/20 · ${rec}`,
+      images: ["/og-tracker.png"],
+    },
+  }
+}
+
+export default async function SetPage({ params }: { params: Promise<{ slug: string }> }) {
+  const { slug } = await params
+  const [setsData, userData] = await Promise.allSettled([getSets(), getUser()])
+  const sets = setsData.status === "fulfilled" ? (setsData.value.sets || []) : []
+  const user = userData.status === "fulfilled" && userData.value.authenticated ? userData.value : null
+  const isPremium = user?.role === "premium" || user?.role === "admin"
+  const set = sets.find((s: any) => toSlug(s.name) === slug)
+  if (!set) notFound()
+  const historyData = await getSetHistory(set.name).catch(() => ({ history: [] }))
+  const history = historyData.history || []
+  const chaseIsNumeric = set.top3_chase ? !isNaN(Number(set.top3_chase)) : true
+  const chaseCards = (!chaseIsNumeric && set.top3_chase) ? set.top3_chase.split(", ") : []
+
+  const jsonLd = {
+    "@context": "https://schema.org",
+    "@type": "Product",
+    name: `${set.name} Booster Box`,
+    description: `Pokemon TCG ${set.name} booster box sealed price tracker. Current price ${formatGBP(set.bb_price_gbp)}, investment score ${set.decision_score}/20.`,
+    brand: { "@type": "Brand", name: "Pokémon TCG" },
+    offers: set.bb_price_gbp ? {
+      "@type": "Offer",
+      price: set.bb_price_gbp.toFixed(2),
+      priceCurrency: "GBP",
+      availability: "https://schema.org/InStock",
+      seller: { "@type": "Organization", name: "TCG Invest" },
+    } : undefined,
+  }
+
+  return (
+    <>
+      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }} />
+      <main className="min-h-screen bg-slate-950 text-slate-100">
+        <div className="max-w-4xl mx-auto px-6 py-12">
+
+          <div className="flex items-center gap-2 text-sm text-slate-500 mb-8">
+            <Link href="/" className="hover:text-slate-300 transition-colors">Home</Link>
+            <span>›</span>
+            <Link href="/tools/tracker" className="hover:text-slate-300 transition-colors">Booster Box Tracker</Link>
+            <span>›</span>
+            <span className="text-slate-300">{set.name}</span>
+          </div>
+
+          <div className="mb-8">
+            <div className="flex flex-wrap items-start gap-6">
+              {set.booster_img_url && (
+                <img
+                  src={set.booster_img_url}
+                  alt={`${set.name} booster box sealed product`}
+                  loading="eager"
+                  width={120}
+                  height={160}
+                  className="object-contain h-40 w-auto rounded-xl shrink-0 drop-shadow-2xl"
+                  onError={undefined}
+                />
+              )}
+              {!set.booster_img_url && set.logo_url && (
+                <img
+                  src={set.logo_url}
+                  alt={`${set.name} Pokemon TCG set logo`}
+                  loading="eager"
+                  width={160}
+                  height={64}
+                  className="object-contain h-16 w-auto shrink-0"
+                />
+              )}
+              <div className="flex-1 min-w-0">
+                <div className="flex flex-wrap items-start justify-between gap-3 mb-2">
+                  <h1 className="text-3xl font-bold text-white">{set.name} Booster Box</h1>
+                  {set.recommendation && (
+                    <div className={`px-4 py-2 rounded-xl font-semibold text-sm shrink-0 ${recColor(set.recommendation)}`}>
+                      {set.recommendation}
+                    </div>
+                  )}
+                </div>
+                <p className="text-slate-400">
+                  {set.era} · Released {set.date_released}
+                  {set.print_status && (
+                    <span className="ml-2 text-xs bg-slate-800 text-slate-400 px-2 py-0.5 rounded-full">{set.print_status}</span>
+                  )}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
+              <p className="text-slate-400 text-xs mb-1">Booster Box Price</p>
+              <p className="text-white text-2xl font-bold">{formatGBP(set.bb_price_gbp)}</p>
+            </div>
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
+              <p className="text-slate-400 text-xs mb-1">Set Value</p>
+              <p className="text-white text-2xl font-bold">{formatGBP(set.set_value_gbp)}</p>
+            </div>
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
+              <p className="text-slate-400 text-xs mb-1">Box %</p>
+              <p className="text-white text-2xl font-bold">
+                {set.box_pct != null ? `${(set.box_pct * 100).toFixed(1)}%` : "—"}
+              </p>
+            </div>
+            <div className={`rounded-xl p-4 ${scoreColor(set.decision_score)}`}>
+              <p className="text-xs mb-1 opacity-70">AI Score</p>
+              <p className="text-2xl font-bold">{set.decision_score ?? "—"}<span className="text-sm font-normal opacity-60"> / 20</span></p>
+            </div>
+          </div>
+
+          {set.bb_price_gbp && (
+            <SetAlertButton
+              productType="set"
+              productId={set.id}
+              productName={set.name}
+              currentPrice={set.bb_price_gbp}
+            />
+          )}
+
+          <div className="mt-6"><Disclaimer /></div>
+
+          <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 mb-6 mt-6">
+            <h2 className="text-slate-200 font-semibold mb-4">Investment Score Breakdown</h2>
+            {isPremium ? (
+              <div className="space-y-4">
+                {[
+                  { label: "Scarcity",     value: set.scarcity,     max: 5, desc: "Print run status and out-of-print likelihood" },
+                  { label: "Liquidity",    value: set.liquidity,    max: 5, desc: "Ease of buying and selling on secondary market" },
+                  { label: "Mascot Power", value: set.mascot_power, max: 5, desc: "Collector desirability of featured Pokémon" },
+                  { label: "Set Depth",    value: set.set_depth,    max: 5, desc: "Breadth of valuable cards across the set" },
+                ].map(({ label, value, max, desc }) => (
+                  <div key={label}>
+                    <div className="flex justify-between text-sm mb-1">
+                      <span className="text-slate-300 font-medium">{label}</span>
+                      <span className="text-slate-400">{value ?? "—"} / {max}</span>
+                    </div>
+                    <div className="h-2 bg-slate-800 rounded-full overflow-hidden mb-1">
+                      <div className="h-full bg-blue-500 rounded-full" style={{ width: value ? `${(value / max) * 100}%` : "0%" }} />
+                    </div>
+                    <p className="text-slate-600 text-xs">{desc}</p>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="border border-yellow-500/20 rounded-xl p-5 text-center">
+                <p className="text-2xl mb-2">⭐</p>
+                <p className="text-slate-200 font-medium text-sm mb-1">Full score breakdown is a Premium feature</p>
+                <p className="text-slate-500 text-xs mb-4">Unlock Scarcity, Liquidity, Mascot Power and Set Depth scores plus AI buy/sell reasoning.</p>
+                <a href="/premium" className="inline-block bg-yellow-500 text-slate-900 text-sm font-medium px-4 py-2 rounded-lg hover:bg-yellow-400 transition-colors">
+                  Upgrade to Premium — £3/month
+                </a>
+              </div>
+            )}
+          </div>
+
+          {(() => {
+            const chaseImgs = set.chase_cards_json ? (() => { try { return JSON.parse(set.chase_cards_json) } catch { return [] } })() : []
+            if (chaseImgs.length > 0) return (
+              <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 mb-6">
+                <h2 className="text-slate-200 font-semibold mb-4">Top Chase Cards</h2>
+                <div className="grid grid-cols-3 gap-4">
+                  {chaseImgs.slice(0, 3).map((card: {name: string; image: string}, i: number) => (
+                    <div key={i} className="flex flex-col items-center gap-2">
+                      <img
+                        src={card.image}
+                        alt={card.name}
+                        loading="lazy"
+                        className="w-full max-w-[140px] rounded-lg shadow-lg object-contain"
+                      />
+                      <p className="text-slate-400 text-xs text-center leading-tight">{card.name}</p>
+                    </div>
+                  ))}
+                </div>
+                {set.chase_pct != null && (
+                  <p className="text-slate-500 text-xs mt-4">Top 3 cards represent {(set.chase_pct * 100).toFixed(1)}% of total set value</p>
+                )}
+              </div>
+            )
+            if (chaseCards.length > 0) return (
+              <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 mb-6">
+                <h2 className="text-slate-200 font-semibold mb-3">Top Chase Cards</h2>
+                <div className="flex flex-wrap gap-2">
+                  {chaseCards.map((card: string, i: number) => (
+                    <span key={i} className="bg-slate-800 text-slate-300 text-sm px-3 py-1.5 rounded-full">{card}</span>
+                  ))}
+                </div>
+                {set.chase_pct != null && (
+                  <p className="text-slate-500 text-xs mt-3">Top 3 cards represent {(set.chase_pct * 100).toFixed(1)}% of total set value</p>
+                )}
+              </div>
+            )
+            return null
+          })()}
+
+          <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 mb-6">
+            <h2 className="text-slate-200 font-semibold mb-4">Price History</h2>
+            {user ? (
+              <SetPageClient history={history} setName={set.name} />
+            ) : (
+              <div className="text-center py-8">
+                <p className="text-slate-400 text-sm mb-3">Sign in free to view price history charts</p>
+                <a href="/auth/google" className="bg-white text-slate-900 text-sm font-medium px-4 py-2 rounded-lg hover:bg-slate-100 transition-colors">
+                  Sign in free →
+                </a>
+              </div>
+            )}
+          </div>
+
+          <div className="bg-slate-900 border border-slate-700 rounded-xl px-5 py-4 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-slate-200 text-sm font-medium">Compare all 46 sets</p>
+              <p className="text-slate-500 text-xs mt-0.5">See where {set.name} ranks across the full booster box tracker</p>
+            </div>
+            <Link href="/tools/tracker" className="bg-white text-slate-900 text-sm font-medium px-4 py-2 rounded-lg hover:bg-slate-100 transition-colors whitespace-nowrap">
+              View full tracker →
+            </Link>
+          </div>
+
+          <p className="text-slate-600 text-xs mt-8">
+            Box % = Booster Box price ÷ Set value. Lower is better. AI scores generated monthly using Groq llama-3.3-70b. Prices sourced from eBay UK sold listings. TCG Invest is not affiliated with The Pokémon Company International.
+          </p>
+
+        </div>
+      </main>
+    </>
+  )
+}

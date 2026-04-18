@@ -1,0 +1,232 @@
+{
+  "151": {
+    "id": "sv3pt5",
+    "logo": "https://images.pokemontcg.io/sv3pt5/logo.png",
+    "symbol": "https://images.pokemontcg.io/sv3pt5/symbol.png"
+  },
+  "Ascended Hereos": {
+    "id": "me2pt5",
+    "logo": "https://images.scrydex.com/pokemon/me2pt5-logo/logo",
+    "symbol": ""
+  },
+  "Astral Radiance": {
+    "id": "swsh10",
+    "logo": "https://images.pokemontcg.io/swsh10/logo.png",
+    "symbol": "https://images.pokemontcg.io/swsh10/symbol.png"
+  },
+  "Battle Styles": {
+    "id": "swsh5",
+    "logo": "https://images.pokemontcg.io/swsh5/logo.png",
+    "symbol": "https://images.pokemontcg.io/swsh5/symbol.png"
+  },
+  "Black Bolt": {
+    "id": "zsv10pt5",
+    "logo": "https://images.pokemontcg.io/zsv10pt5/logo.png",
+    "symbol": "https://images.pokemontcg.io/zsv10pt5/symbol.png"
+  },
+  "Brilliant Stars": {
+    "id": "swsh9",
+    "logo": "https://images.pokemontcg.io/swsh9/logo.png",
+    "symbol": "https://images.pokemontcg.io/swsh9/symbol.png"
+  },
+  "Celebrations 25th": {
+    "id": "cel25",
+    "logo": "https://images.pokemontcg.io/cel25/logo.png",
+    "symbol": "https://images.pokemontcg.io/cel25/symbol.png"
+  },
+  "Champions Path": {
+    "id": "swsh35",
+    "logo": "https://images.pokemontcg.io/swsh35/logo.png",
+    "symbol": "https://images.pokemontcg.io/swsh35/symbol.png"
+  },
+  "Chilling Reign": {
+    "id": "swsh6",
+    "logo": "https://images.pokemontcg.io/swsh6/logo.png",
+    "symbol": "https://images.pokemontcg.io/swsh6/symbol.png"
+  },
+  "Cosmic Eclipse": {
+    "id": "sm12",
+    "logo": "https://images.pokemontcg.io/sm12/logo.png",
+    "symbol": "https://images.pokemontcg.io/sm12/symbol.png"
+  },
+  "Crown Zenith": {
+    "id": "swsh12pt5",
+    "logo": "https://images.pokemontcg.io/swsh12pt5/logo.png",
+    "symbol": "https://images.pokemontcg.io/swsh12pt5/symbol.png"
+  },
+  "Darkness Ablaze": {
+    "id": "swsh3",
+    "logo": "https://images.pokemontcg.io/swsh3/logo.png",
+    "symbol": "https://images.pokemontcg.io/swsh3/symbol.png"
+  },
+  "Destined Rivals": {
+    "id": "sv10",
+    "logo": "https://images.pokemontcg.io/sv10/logo.png",
+    "symbol": "https://images.pokemontcg.io/sv10/symbol.png"
+  },
+  "Evolutions": {
+    "id": "xy12",
+    "logo": "https://images.pokemontcg.io/xy12/logo.png",
+    "symbol": "https://images.pokemontcg.io/xy12/symbol.png"
+  },
+  "Evolving Skies": {
+    "id": "swsh7",
+    "logo": "https://images.pokemontcg.io/swsh7/logo.png",
+    "symbol": "https://images.pokemontcg.io/swsh7/symbol.png"
+  },
+  "Fusion Strike": {
+    "id": "swsh8",
+    "logo": "https://images.pokemontcg.io/swsh8/logo.png",
+    "symbol": "https://images.pokemontcg.io/swsh8/symbol.png"
+  },
+  "Hidden Fates": {
+    "id": "sm115",
+    "logo": "https://images.pokemontcg.io/sm115/logo.png",
+    "symbol": "https://images.pokemontcg.io/sm115/symbol.png"
+  },
+  "Journey Together": {
+    "id": "sv9",
+    "logo": "https://images.pokemontcg.io/sv9/logo.png",
+    "symbol": "https://images.pokemontcg.io/sv9/symbol.png"
+  },
+  "Journey Together (Enhanced)": {
+    "id": "sv9",
+    "logo": "https://images.pokemontcg.io/sv9/logo.png",
+    "symbol": "https://images.pokemontcg.io/sv9/symbol.png"
+  },
+  "Lost Origin": {
+    "id": "swsh11",
+    "logo": "https://images.pokemontcg.io/swsh11/logo.png",
+    "symbol": "https://images.pokemontcg.io/swsh11/symbol.png"
+  },
+  "Lost Thunder": {
+    "id": "sm8",
+    "logo": "https://images.pokemontcg.io/sm8/logo.png",
+    "symbol": "https://images.pokemontcg.io/sm8/symbol.png"
+  },
+  "Mega Evolution": {
+    "id": "me1",
+    "logo": "https://images.pokemontcg.io/me1/logo.png",
+    "symbol": "https://images.pokemontcg.io/me1/symbol.png"
+  },
+  "Mega Evolution (Enhanced)": {
+    "id": "me1",
+    "logo": "https://images.pokemontcg.io/me1/logo.png",
+    "symbol": "https://images.pokemontcg.io/me1/symbol.png"
+  },
+  "Obsidian Flames": {
+    "id": "sv3",
+    "logo": "https://images.pokemontcg.io/sv3/logo.png",
+    "symbol": "https://images.pokemontcg.io/sv3/symbol.png"
+  },
+  "Paldea Evolved": {
+    "id": "sv2",
+    "logo": "https://images.pokemontcg.io/sv2/logo.png",
+    "symbol": "https://images.pokemontcg.io/sv2/symbol.png"
+  },
+  "Paldean Fates": {
+    "id": "sv4pt5",
+    "logo": "https://images.pokemontcg.io/sv4pt5/logo.png",
+    "symbol": "https://images.pokemontcg.io/sv4pt5/symbol.png"
+  },
+  "Paradox Rift": {
+    "id": "sv4",
+    "logo": "https://images.pokemontcg.io/sv4/logo.png",
+    "symbol": "https://images.pokemontcg.io/sv4/symbol.png"
+  },
+  "Perfect Order": {
+    "id": "me3",
+    "logo": "https://images.scrydex.com/pokemon/me3-logo/logo",
+    "symbol": "https://images.scrydex.com/pokemon/me3-symbol/symbol"
+  },
+  "Phantasmal Flames": {
+    "id": "me2",
+    "logo": "https://images.pokemontcg.io/me2/logo.png",
+    "symbol": "https://images.pokemontcg.io/me2/symbol.png"
+  },
+  "Prismatic Evolutions": {
+    "id": "sv8pt5",
+    "logo": "https://images.pokemontcg.io/sv8pt5/logo.png",
+    "symbol": "https://images.pokemontcg.io/sv8pt5/symbol.png"
+  },
+  "Rebel Clash": {
+    "id": "swsh2",
+    "logo": "https://images.pokemontcg.io/swsh2/logo.png",
+    "symbol": "https://images.pokemontcg.io/swsh2/symbol.png"
+  },
+  "Shining Fates": {
+    "id": "swsh45",
+    "logo": "https://images.pokemontcg.io/swsh45/logo.png",
+    "symbol": "https://images.pokemontcg.io/swsh45/symbol.png"
+  },
+  "Shrouded Fable": {
+    "id": "sv6pt5",
+    "logo": "https://images.pokemontcg.io/sv6pt5/logo.png",
+    "symbol": "https://images.pokemontcg.io/sv6pt5/symbol.png"
+  },
+  "Silver Tempest": {
+    "id": "swsh12",
+    "logo": "https://images.pokemontcg.io/swsh12/logo.png",
+    "symbol": "https://images.pokemontcg.io/swsh12/symbol.png"
+  },
+  "Stellar Crown": {
+    "id": "sv7",
+    "logo": "https://images.pokemontcg.io/sv7/logo.png",
+    "symbol": "https://images.pokemontcg.io/sv7/symbol.png"
+  },
+  "Surging Sparks": {
+    "id": "sv8",
+    "logo": "https://images.pokemontcg.io/sv8/logo.png",
+    "symbol": "https://images.pokemontcg.io/sv8/symbol.png"
+  },
+  "S&V Base set": {
+    "id": "base1",
+    "logo": "https://images.pokemontcg.io/base1/logo.png",
+    "symbol": "https://images.pokemontcg.io/base1/symbol.png"
+  },
+  "Sword and Shield": {
+    "id": "swsh1",
+    "logo": "https://images.pokemontcg.io/swsh1/logo.png",
+    "symbol": "https://images.pokemontcg.io/swsh1/symbol.png"
+  },
+  "Team Up": {
+    "id": "sm9",
+    "logo": "https://images.pokemontcg.io/sm9/logo.png",
+    "symbol": "https://images.pokemontcg.io/sm9/symbol.png"
+  },
+  "Temporal Forces": {
+    "id": "sv5",
+    "logo": "https://images.pokemontcg.io/sv5/logo.png",
+    "symbol": "https://images.pokemontcg.io/sv5/symbol.png"
+  },
+  "Twilight Masquerade": {
+    "id": "sv6",
+    "logo": "https://images.pokemontcg.io/sv6/logo.png",
+    "symbol": "https://images.pokemontcg.io/sv6/symbol.png"
+  },
+  "Ultra Prism": {
+    "id": "sm5",
+    "logo": "https://images.pokemontcg.io/sm5/logo.png",
+    "symbol": "https://images.pokemontcg.io/sm5/symbol.png"
+  },
+  "Unbroken Bonds": {
+    "id": "sm10",
+    "logo": "https://images.pokemontcg.io/sm10/logo.png",
+    "symbol": "https://images.pokemontcg.io/sm10/symbol.png"
+  },
+  "Unified Minds": {
+    "id": "sm11",
+    "logo": "https://images.pokemontcg.io/sm11/logo.png",
+    "symbol": "https://images.pokemontcg.io/sm11/symbol.png"
+  },
+  "Vivid Voltage": {
+    "id": "swsh4",
+    "logo": "https://images.pokemontcg.io/swsh4/logo.png",
+    "symbol": "https://images.pokemontcg.io/swsh4/symbol.png"
+  },
+  "White Flare": {
+    "id": "rsv10pt5",
+    "logo": "https://images.pokemontcg.io/rsv10pt5/logo.png",
+    "symbol": "https://images.pokemontcg.io/rsv10pt5/symbol.png"
+  }
+}
