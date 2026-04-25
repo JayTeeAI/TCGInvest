@@ -1,4 +1,4 @@
-import { getETBs, getETBMovers } from "@/lib/api"
+import { getETBs, getETBMovers, getETBSnapshotDates } from "@/lib/api"
 import { getUser } from "@/lib/auth"
 import { ETBTable } from "@/components/etb/ETBTable"
 import { ETBMoversPanel } from "@/components/etb/ETBMoversPanel"
@@ -28,17 +28,33 @@ export const metadata: Metadata = {
   },
 }
 
-export default async function ETBTrackerPage() {
-  const [etbData, moversData, userData] = await Promise.allSettled([
-    getETBs(),
+function fmtDate(d: string) {
+  const [y, m] = d.split("-")
+  const months = ["","Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+  return `${months[parseInt(m)]} ${y}`
+}
+
+export default async function ETBTrackerPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ date?: string }>
+}) {
+  const params = await searchParams
+  const selectedDate = params.date || undefined
+
+  const [etbData, moversData, datesData, userData] = await Promise.allSettled([
+    getETBs(selectedDate),
     getETBMovers(),
+    getETBSnapshotDates(),
     getUser(),
   ])
 
-  const etbs    = etbData.status === "fulfilled" ? etbData.value.etbs : []
-  const movers  = moversData.status === "fulfilled" ? moversData.value : null
-  const user    = userData.status === "fulfilled" && userData.value.authenticated ? userData.value : null
-  const isLoggedIn = !!user
+  const etbs          = etbData.status === "fulfilled" ? etbData.value.etbs : []
+  const movers        = moversData.status === "fulfilled" ? moversData.value : null
+  const snapshotDates = datesData.status === "fulfilled" ? datesData.value.snapshot_dates : []
+  const user          = userData.status === "fulfilled" && userData.value.authenticated ? userData.value : null
+  const isLoggedIn    = !!user
+  const isLatestDate  = !selectedDate || selectedDate === snapshotDates[0]
 
   return (
     <>
@@ -56,8 +72,50 @@ export default async function ETBTrackerPage() {
               <h1 className="text-3xl font-bold text-white">Pokemon Centre ETB Tracker</h1>
               <span className="text-xs font-medium px-2 py-1 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20">Updated weekly</span>
             </div>
-            <p className="text-slate-400">Sealed prices, promo card values and PSA grading premiums for {etbs.length} Pokemon Centre exclusive ETBs.</p>
+            <p className="text-slate-400">
+              Sealed prices, promo card values and PSA grading premiums for {etbs.length} Pokemon Centre exclusive ETBs.
+              {selectedDate && (
+                <span className="ml-2 text-slate-500 text-sm">Showing {fmtDate(selectedDate)}</span>
+              )}
+            </p>
           </div>
+
+          {snapshotDates.length > 1 && (
+            <div className="flex gap-2 flex-wrap">
+              {snapshotDates.map((d: string, i: number) => {
+                const isLatest   = i === 0
+                const isSelected = (selectedDate === d) || (!selectedDate && isLatest)
+                const isLocked   = !isLatest && !user
+
+                if (isLocked) {
+                  return (
+                    <Link
+                      key={d}
+                      href="/auth/google"
+                      className="px-3 py-1.5 rounded-lg text-sm transition-colors bg-slate-900 text-slate-600 border border-slate-800 flex items-center gap-1"
+                      title="Sign in to view historical snapshots"
+                    >
+                      🔒 {fmtDate(d)}
+                    </Link>
+                  )
+                }
+
+                return (
+                  <Link
+                    key={d}
+                    href={isLatest ? "/tools/etb-tracker" : `/tools/etb-tracker?date=${d}`}
+                    className={`px-3 py-1.5 rounded-lg text-sm transition-colors ${
+                      isSelected
+                        ? "bg-slate-600 text-white"
+                        : "bg-slate-900 text-slate-400 hover:text-slate-200 border border-slate-800"
+                    }`}
+                  >
+                    {fmtDate(d)}
+                  </Link>
+                )
+              })}
+            </div>
+          )}
         </div>
 
         {!user && (
@@ -99,8 +157,12 @@ export default async function ETBTrackerPage() {
           </div>
         )}
 
-        {isLoggedIn && movers && movers.movers?.length > 0 && (
+        {isLoggedIn && isLatestDate && movers && movers.movers?.length > 0 && (
           <ETBMoversPanel movers={movers.movers} latest={movers.latest} previous={movers.previous} />
+        )}
+
+        {isLoggedIn && isLatestDate && movers && !movers.movers?.length && (
+          <ETBMoversPanel movers={[]} latest={movers.latest} previous={movers.previous} />
         )}
 
         {!isLoggedIn && (

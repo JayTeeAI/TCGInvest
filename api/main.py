@@ -9,7 +9,7 @@ import os
 import psycopg2
 import psycopg2.extras
 from typing import Optional
-from fastapi import FastAPI, HTTPException, Depends, Query
+from fastapi import FastAPI, HTTPException, Depends, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader
 from dotenv import load_dotenv
@@ -152,6 +152,110 @@ def get_run_dates(_: str = Depends(require_api_key)):
         conn.close()
 
 
+@app.get("/api/sets/{set_id}/momentum")
+def get_set_momentum(set_id: int, _: str = Depends(require_api_key)):
+    """
+    Returns 7-day and 30-day % price change for a set's booster box and PC ETB,
+    computed from tcgcsv_prices daily data. FX conversion via stored rate.
+    Periods use closest available snapshot to 7/30 days ago (backfill may have gaps).
+    """
+    from psycopg2.extras import RealDictCursor as _RDC
+    conn = get_db()
+    try:
+        cur = conn.cursor(cursor_factory=_RDC)
+
+        # Get mapped product IDs for this set
+        cur.execute(
+            "SELECT tcgcsv_bb_product_id, tcgcsv_etb_product_id FROM sets WHERE id = %s",
+            (set_id,)
+        )
+        s = cur.fetchone()
+        if not s:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404, detail="Set not found")
+
+        bb_pid  = s["tcgcsv_bb_product_id"]
+        etb_pid = s["tcgcsv_etb_product_id"]
+
+        # Fetch live USD→GBP rate (cached in DB via latest snapshot)
+        fx_rate = 0.79  # fallback
+        try:
+            import urllib.request, json as _json
+            with urllib.request.urlopen("https://open.er-api.com/v6/latest/USD", timeout=5) as resp:
+                fx_rate = float(_json.loads(resp.read())["rates"]["GBP"])
+        except Exception:
+            pass
+
+        def calc_momentum(product_id):
+            """Returns dict with today_gbp, d7_pct, d30_pct (all may be None)."""
+            if not product_id:
+                return None
+
+            cur.execute("""
+                SELECT snapshot_date, market_price_usd
+                FROM tcgcsv_prices
+                WHERE product_id = %s AND sub_type_name = 'Normal' AND market_price_usd IS NOT NULL
+                ORDER BY snapshot_date DESC
+                LIMIT 60
+            """, (product_id,))
+            rows = cur.fetchall()
+            if not rows:
+                return None
+
+            # Sort descending by date
+            rows_sorted = sorted(rows, key=lambda r: r["snapshot_date"], reverse=True)
+            latest = rows_sorted[0]
+            today_usd = float(latest["market_price_usd"])
+            today_gbp = round(today_usd * fx_rate, 2)
+            today_date = latest["snapshot_date"]
+
+            def find_closest(target_days):
+                from datetime import timedelta
+                target = today_date - timedelta(days=target_days)
+                best = None
+                best_diff = 999
+                for r in rows_sorted:
+                    diff = abs((r["snapshot_date"] - target).days)
+                    if diff < best_diff:
+                        best_diff = diff
+                        best = r
+                # Only use if within ±5 days of target
+                if best and best_diff <= 5 and best["snapshot_date"] != today_date:
+                    return best
+                return None
+
+            d7_row  = find_closest(7)
+            d30_row = find_closest(30)
+
+            def pct_change(old_row):
+                if not old_row or not old_row["market_price_usd"]:
+                    return None
+                old_usd = float(old_row["market_price_usd"])
+                if old_usd == 0:
+                    return None
+                return round(((today_usd - old_usd) / old_usd) * 100, 2)
+
+            return {
+                "today_gbp": today_gbp,
+                "today_usd": round(today_usd, 2),
+                "d7_pct":    pct_change(d7_row),
+                "d30_pct":   pct_change(d30_row),
+                "d7_from":   str(d7_row["snapshot_date"])  if d7_row  else None,
+                "d30_from":  str(d30_row["snapshot_date"]) if d30_row else None,
+            }
+
+        bb_data  = calc_momentum(bb_pid)
+        etb_data = calc_momentum(etb_pid)
+
+        return {
+            "set_id": set_id,
+            "bb":  bb_data,
+            "etb": etb_data,
+        }
+    finally:
+        conn.close()
+
+
 @app.get("/api/sets/{set_name}/history")
 def get_set_history(set_name: str, _: str = Depends(require_api_key)):
     conn = get_db()
@@ -178,10 +282,186 @@ def get_set_history(set_name: str, _: str = Depends(require_api_key)):
         """, (set_row["id"],))
         history = cur.fetchall()
 
-        return {"set": dict(set_row), "history": [dict(row) for row in history]}
+        return {
+            "set": dict(set_row),
+            "history": [dict(row) for row in history],
+            "sparse": len(history) < 3,
+            "snapshot_count": len(history),
+        }
     finally:
         conn.close()
 
+
+
+
+@app.get("/api/sets/{set_name}/card-price-history")
+def get_set_card_price_history(set_name: str, _: str = Depends(require_api_key)):
+    """
+    Weekly aggregated card market price index for a set, sourced from tcgcsv_prices.
+    Returns one data point per week: the average market_price_usd across all Normal
+    sub-type products in all TCGCSV groups mapped to this set.
+    Used for the card price trend chart on /sets/[slug].
+    """
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+
+        # Look up the set and its TCGCSV group IDs
+        cur.execute(
+            "SELECT id, name, tcgcsv_group_ids FROM sets WHERE name = %s",
+            (set_name,)
+        )
+        set_row = cur.fetchone()
+        if not set_row:
+            raise HTTPException(status_code=404, detail=f"Set '{set_name}' not found")
+
+        group_ids = set_row["tcgcsv_group_ids"]
+        if not group_ids:
+            return {"set": set_row["name"], "history": []}
+
+        # Weekly avg market price across all mapped groups, Normal sub-type only
+        cur.execute("""
+            SELECT
+                DATE_TRUNC('week', snapshot_date)::date AS week_start,
+                ROUND(AVG(market_price_usd) FILTER (WHERE sub_type_name = 'Normal')::numeric, 4) AS avg_market_usd,
+                COUNT(DISTINCT product_id) FILTER (WHERE sub_type_name = 'Normal') AS product_count
+            FROM tcgcsv_prices
+            WHERE group_id = ANY(%s)
+              AND market_price_usd IS NOT NULL
+            GROUP BY DATE_TRUNC('week', snapshot_date)
+            HAVING AVG(market_price_usd) FILTER (WHERE sub_type_name = 'Normal') IS NOT NULL
+            ORDER BY week_start ASC
+        """, (group_ids,))
+
+        rows = cur.fetchall()
+        return {
+            "set": set_row["name"],
+            "history": [
+                {
+                    "week": str(r["week_start"]),
+                    "avg_market_usd": float(r["avg_market_usd"]),
+                    "product_count": r["product_count"],
+                }
+                for r in rows
+            ]
+        }
+    finally:
+        conn.close()
+
+
+
+@app.get("/api/sets/{set_id}/bb-price-history-daily")
+def get_set_bb_price_history_daily(set_id: int, _: str = Depends(require_api_key)):
+    """
+    Daily booster box price history for a set, sourced from tcgcsv_prices.
+    Returns USD market price per day for the set's tcgcsv_bb_product_id.
+    FX rate fetched live (fallback 0.79) to also return GBP.
+    Used for the stock-style BB price chart with 1D/1W/1M/1Y/All range selector.
+    """
+    from psycopg2.extras import RealDictCursor as _RDC
+    conn = get_db()
+    try:
+        cur = conn.cursor(cursor_factory=_RDC)
+
+        cur.execute(
+            "SELECT tcgcsv_bb_product_id FROM sets WHERE id = %s",
+            (set_id,)
+        )
+        s = cur.fetchone()
+        if not s:
+            raise HTTPException(status_code=404, detail="Set not found")
+
+        bb_pid = s["tcgcsv_bb_product_id"]
+        if not bb_pid:
+            return {"set_id": set_id, "history": []}
+
+        # Live FX rate
+        fx_rate = 0.79
+        try:
+            import urllib.request as _ur, json as _json
+            with _ur.urlopen("https://open.er-api.com/v6/latest/USD", timeout=5) as resp:
+                fx_rate = float(_json.loads(resp.read())["rates"]["GBP"])
+        except Exception:
+            pass
+
+        cur.execute("""
+            SELECT
+                snapshot_date::date AS day,
+                market_price_usd
+            FROM tcgcsv_prices
+            WHERE product_id = %s
+              AND sub_type_name = 'Normal'
+              AND market_price_usd IS NOT NULL
+            ORDER BY day ASC
+        """, (bb_pid,))
+
+        rows = cur.fetchall()
+        return {
+            "set_id": set_id,
+            "fx_rate": round(fx_rate, 4),
+            "history": [
+                {
+                    "date": str(r["day"]),
+                    "price_usd": float(r["market_price_usd"]),
+                    "price_gbp": round(float(r["market_price_usd"]) * fx_rate, 2),
+                }
+                for r in rows
+            ]
+        }
+    finally:
+        conn.close()
+
+@app.get("/api/sets/{set_name}/card-price-history-daily")
+def get_set_card_price_history_daily(set_name: str, _: str = Depends(require_api_key)):
+    """
+    Daily card market price index for a set, sourced from tcgcsv_prices.
+    Returns one data point per day: the average market_price_usd across all Normal
+    sub-type products in all TCGCSV groups mapped to this set.
+    Used for the stock-style chart with 1D/1W/1M/1Y/All range selector on /sets/[slug].
+    """
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+
+        cur.execute(
+            "SELECT id, name, tcgcsv_group_ids FROM sets WHERE name = %s",
+            (set_name,)
+        )
+        set_row = cur.fetchone()
+        if not set_row:
+            raise HTTPException(status_code=404, detail=f"Set '{set_name}' not found")
+
+        group_ids = set_row["tcgcsv_group_ids"]
+        if not group_ids:
+            return {"set": set_row["name"], "history": []}
+
+        cur.execute("""
+            SELECT
+                snapshot_date::date AS day,
+                ROUND(AVG(market_price_usd) FILTER (WHERE sub_type_name = 'Normal')::numeric, 4) AS avg_market_usd,
+                COUNT(DISTINCT product_id) FILTER (WHERE sub_type_name = 'Normal') AS product_count
+            FROM tcgcsv_prices
+            WHERE group_id = ANY(%s)
+              AND market_price_usd IS NOT NULL
+            GROUP BY snapshot_date::date
+            HAVING AVG(market_price_usd) FILTER (WHERE sub_type_name = 'Normal') IS NOT NULL
+            ORDER BY day ASC
+        """, (group_ids,))
+
+        rows = cur.fetchall()
+        return {
+            "set": set_row["name"],
+            "history": [
+                {
+                    "date": str(r["day"]),
+                    "avg_market_usd": float(r["avg_market_usd"]),
+                    "product_count": r["product_count"],
+                }
+                for r in rows
+            ]
+        }
+    finally:
+        conn.close()
 
 @app.get("/api/movers")
 def get_movers(_: str = Depends(require_api_key)):
@@ -287,6 +567,10 @@ def get_summary(_: str = Depends(require_api_key)):
         etb_row = cur.fetchone()
         etb_count = etb_row["etb_count"] if etb_row else 0
 
+        cur.execute("SELECT COUNT(*) as chase_count FROM chase_cards WHERE active = TRUE")
+        chase_row = cur.fetchone()
+        chase_count = chase_row["chase_count"] if chase_row else 0
+
         cur.execute(
             "SELECT * FROM run_log WHERE run_date = %s ORDER BY id DESC LIMIT 1",
             (latest,)
@@ -295,7 +579,7 @@ def get_summary(_: str = Depends(require_api_key)):
 
         return {
             "run_date": latest,
-            "stats":    {**dict(stats), "etb_count": etb_count},
+            "stats":    {**dict(stats), "etb_count": etb_count, "chase_cards_count": chase_count},
             "last_run": dict(run_log) if run_log else None,
         }
     finally:
@@ -323,19 +607,35 @@ def get_tools(_: str = Depends(require_api_key)):
                 "updated":     "weekly",
             },
             {
+                "slug":        "chase-cards",
+                "name":        "Chase Card Tracker",
+                "description": "Track raw prices, PSA 10 values and grading ROI for the top chase cards across 40+ Pokemon TCG sets",
+                "status":      "live",
+                "route":       "/tools/chase-cards",
+                "updated":     "weekly",
+            },
+            {
                 "slug":        "roi-calculator",
                 "name":        "ROI Calculator",
                 "description": "Calculate return on investment for sealed product over time",
-                "status":      "coming_soon",
-                "route":       "/tools/roi",
+                "status":      "live",
+                "route":       "/tools/roi-calculator",
                 "updated":     None,
             },
             {
                 "slug":        "price-alerts",
                 "name":        "Price Alerts",
-                "description": "Get notified when a set drops below your target Box %",
-                "status":      "coming_soon",
-                "route":       "/tools/alerts",
+                "description": "Get email alerts when a booster box, ETB, or chase card drops below your target price.",
+                "status":      "live",
+                "route":       "/tools/price-alerts",
+                "updated":     None,
+            },
+            {
+                "slug":        "portfolio",
+                "name":        "My Portfolio",
+                "description": "Track your sealed product investments — cost basis, current value, and unrealised P&L. Premium only.",
+                "status":      "live",
+                "route":       "/account/portfolio",
                 "updated":     None,
             },
         ]
@@ -585,7 +885,7 @@ def get_watchlist(user=Depends(require_auth)):
     try:
         cur = conn.cursor()
         cur.execute(
-            "SELECT set_name, created_at FROM watchlist WHERE user_id = %s ORDER BY created_at DESC",
+            "SELECT set_name, created_at, bought FROM watchlist WHERE user_id = %s ORDER BY created_at DESC",
             (int(user["sub"]),)
         )
         rows = cur.fetchall()
@@ -633,36 +933,145 @@ def remove_from_watchlist(set_name: str, user=Depends(require_auth)):
         conn.close()
 
 
-# ─── ETB TRACKER ─────────────────────────────────────────────────────────────
-
-@app.get("/api/etbs")
-def get_etbs(_: str = Depends(require_api_key)):
+@app.post("/api/watchlist/{set_name}/bought")
+def mark_bought(set_name: str, user=Depends(require_auth)):
     conn = get_db()
     try:
         cur = conn.cursor()
+        cur.execute(
+            "UPDATE watchlist SET bought = TRUE WHERE user_id = %s AND set_name = %s",
+            (int(user["sub"]), set_name)
+        )
+        conn.commit()
+        return {"bought": True}
+    finally:
+        conn.close()
+
+
+@app.delete("/api/watchlist/{set_name}/bought")
+def unmark_bought(set_name: str, user=Depends(require_auth)):
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE watchlist SET bought = FALSE WHERE user_id = %s AND set_name = %s",
+            (int(user["sub"]), set_name)
+        )
+        conn.commit()
+        return {"bought": False}
+    finally:
+        conn.close()
+
+
+# ─── ETB TRACKER ─────────────────────────────────────────────────────────────
+
+@app.get("/api/etb/snapshot-dates")
+def get_etb_snapshot_dates(_: str = Depends(require_api_key)):
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        # Return only the latest snapshot per calendar month (collect weekly, expose monthly)
         cur.execute("""
-            SELECT
-                e.id, e.name, e.promo_pokemon, e.promo_card_code,
-                e.is_stamped_promo, e.pack_count, e.msrp_gbp,
-                e.drop_type, e.available_date, e.in_stock,
-                e.promo_desirability, e.set_desirability,
-                e.drop_scarcity, e.promo_artist,
-                s.name as set_name, s.era, s.logo_url,
-                p.ebay_avg_sold_gbp, p.sealed_premium_pct,
-                p.raw_promo_gbp, p.psa10_promo_gbp,
-                p.psa_premium_ratio, p.snapshot_date
-            FROM etbs e
-            LEFT JOIN sets s ON s.id = e.set_id
-            LEFT JOIN LATERAL (
-                SELECT * FROM etb_price_snapshots
-                WHERE etb_id = e.id
-                ORDER BY snapshot_date DESC
-                LIMIT 1
-            ) p ON true
-            ORDER BY e.available_date DESC
+            SELECT DISTINCT ON (DATE_TRUNC('month', snapshot_date))
+                snapshot_date
+            FROM etb_price_snapshots
+            ORDER BY DATE_TRUNC('month', snapshot_date) DESC, snapshot_date DESC
         """)
+        dates = [row["snapshot_date"].isoformat() for row in cur.fetchall()]
+        return {"snapshot_dates": dates}
+    finally:
+        conn.close()
+
+
+@app.get("/api/etbs")
+def get_etbs(snapshot_date: str = None, _: str = Depends(require_api_key)):
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        if snapshot_date:
+            lateral = """
+                SELECT * FROM etb_price_snapshots
+                WHERE etb_id = e.id AND snapshot_date = %s
+                LIMIT 1
+            """
+            cur.execute("""
+                SELECT
+                    e.id, e.name, e.promo_pokemon, e.promo_card_code,
+                    e.is_stamped_promo, e.pack_count, e.msrp_gbp,
+                    e.drop_type, e.available_date, e.in_stock,
+                    e.promo_desirability, e.set_desirability,
+                    e.drop_scarcity, e.promo_artist,
+                    s.name as set_name, s.era, s.logo_url,
+                    p.ebay_avg_sold_gbp, p.sealed_premium_pct,
+                    p.raw_promo_gbp, p.psa10_promo_gbp,
+                    p.psa_premium_ratio, p.snapshot_date,
+                    h.heat_score, h.bb_trend_score, h.chase_trend_score,
+                    h.pull_rate_score
+                FROM etbs e
+                LEFT JOIN sets s ON s.id = e.set_id
+                LEFT JOIN LATERAL (
+                    SELECT * FROM etb_price_snapshots
+                    WHERE etb_id = e.id AND snapshot_date = %s
+                    LIMIT 1
+                ) p ON true
+                LEFT JOIN LATERAL (
+                    SELECT heat_score, bb_trend_score, chase_trend_score, pull_rate_score
+                    FROM set_heat_scores
+                    WHERE set_id = e.set_id
+                    ORDER BY score_date DESC
+                    LIMIT 1
+                ) h ON true
+                ORDER BY e.available_date DESC
+            """, (snapshot_date,))
+        else:
+            cur.execute("""
+                SELECT
+                    e.id, e.name, e.promo_pokemon, e.promo_card_code,
+                    e.is_stamped_promo, e.pack_count, e.msrp_gbp,
+                    e.drop_type, e.available_date, e.in_stock,
+                    e.promo_desirability, e.set_desirability,
+                    e.drop_scarcity, e.promo_artist,
+                    s.name as set_name, s.era, s.logo_url,
+                    p.ebay_avg_sold_gbp, p.sealed_premium_pct,
+                    p.raw_promo_gbp, p.psa10_promo_gbp,
+                    p.psa_premium_ratio, p.snapshot_date,
+                    h.heat_score, h.bb_trend_score, h.chase_trend_score,
+                    h.pull_rate_score
+                FROM etbs e
+                LEFT JOIN sets s ON s.id = e.set_id
+                LEFT JOIN LATERAL (
+                    SELECT * FROM etb_price_snapshots
+                    WHERE etb_id = e.id
+                    ORDER BY snapshot_date DESC
+                    LIMIT 1
+                ) p ON true
+                LEFT JOIN LATERAL (
+                    SELECT heat_score, bb_trend_score, chase_trend_score, pull_rate_score
+                    FROM set_heat_scores
+                    WHERE set_id = e.set_id
+                    ORDER BY score_date DESC
+                    LIMIT 1
+                ) h ON true
+                ORDER BY e.available_date DESC
+            """)
         rows = cur.fetchall()
-        return {"count": len(rows), "etbs": [dict(r) for r in rows]}
+        etbs_out = []
+        for r in rows:
+            row_dict = dict(r)
+            # A6: price_source transparency — ETBs currently use eBay snapshot data
+            # tcgcsv_product_id is mapped but no TCGCSV sealed price data exists yet
+            row_dict["price_source"] = "ebay_snapshot"
+            # A8: ensure heat_score is float or None
+            if row_dict.get("heat_score") is not None:
+                row_dict["heat_score"] = float(row_dict["heat_score"])
+            if row_dict.get("bb_trend_score") is not None:
+                row_dict["bb_trend_score"] = float(row_dict["bb_trend_score"])
+            if row_dict.get("chase_trend_score") is not None:
+                row_dict["chase_trend_score"] = float(row_dict["chase_trend_score"])
+            if row_dict.get("pull_rate_score") is not None:
+                row_dict["pull_rate_score"] = float(row_dict["pull_rate_score"])
+            etbs_out.append(row_dict)
+        return {"count": len(etbs_out), "etbs": etbs_out}
     finally:
         conn.close()
 
@@ -776,6 +1185,7 @@ def get_etb_movers(_: str = Depends(require_api_key)):
         cur.execute("""
             SELECT
                 e.id, e.name, e.promo_pokemon,
+                e.logo_url,
                 curr.ebay_avg_sold_gbp AS curr_price,
                 prev.ebay_avg_sold_gbp AS prev_price,
                 curr.sealed_premium_pct AS curr_premium
@@ -797,6 +1207,7 @@ def get_etb_movers(_: str = Depends(require_api_key)):
                     "id":           r["id"],
                     "name":         r["name"],
                     "promo_pokemon":r["promo_pokemon"],
+                    "logo_url":     r.get("logo_url"),
                     "curr_price":   float(r["curr_price"]),
                     "prev_price":   float(r["prev_price"]),
                     "change":       change,
@@ -905,7 +1316,7 @@ async def create_alert(request: Request, user=Depends(require_auth)):
 
     if not all([product_type, product_id is not None, product_name, threshold_gbp is not None]):
         raise HTTPException(status_code=400, detail="Missing required fields")
-    if product_type not in ("set", "etb"):
+    if product_type not in ("set", "etb", "chase_card"):
         raise HTTPException(status_code=400, detail="Invalid product_type")
     try:
         threshold_gbp = float(threshold_gbp)
@@ -999,13 +1410,18 @@ async def run_alert_checks(request: Request):
             try:
                 if product_type == "set":
                     cur.execute("SELECT bb_price_gbp FROM sets WHERE id = %s", (product_id,))
-                else:
+                    price_row = cur.fetchone()
+                    val = price_row["bb_price_gbp"] if price_row else None
+                elif product_type == "etb":
                     cur.execute("SELECT ebay_avg_sold_gbp FROM etb_price_snapshots WHERE etb_id = %s ORDER BY snapshot_date DESC LIMIT 1", (product_id,))
-                price_row = cur.fetchone()
-                if price_row:
-                    val = price_row["bb_price_gbp"] if product_type == "set" else price_row["ebay_avg_sold_gbp"]
-                    if val:
-                        current_price = float(val)
+                    price_row = cur.fetchone()
+                    val = price_row["ebay_avg_sold_gbp"] if price_row else None
+                else:  # chase_card
+                    cur.execute("SELECT raw_gbp FROM chase_card_prices WHERE chase_card_id = %s ORDER BY snapshot_date DESC LIMIT 1", (product_id,))
+                    price_row = cur.fetchone()
+                    val = price_row["raw_gbp"] if price_row else None
+                if val:
+                    current_price = float(val)
             except Exception:
                 continue
 
@@ -1115,6 +1531,7 @@ async def run_digest(request: Request):
         AND (
             EXISTS (SELECT 1 FROM watchlist w WHERE w.user_id = u.id)
             OR EXISTS (SELECT 1 FROM etb_watchlist ew WHERE ew.user_id = u.id)
+            OR EXISTS (SELECT 1 FROM chase_watchlist cw WHERE cw.user_id = u.id)
         )
     """, (frequency_filter,))
     users = cur.fetchall()
@@ -1145,7 +1562,7 @@ async def run_digest(request: Request):
                     AND run_date < (SELECT MAX(run_date) FROM monthly_snapshots)
                     ORDER BY run_date DESC LIMIT 1
                 ) prev_ms ON true
-                WHERE w.user_id = %s
+                WHERE w.user_id = %s AND w.bought = FALSE
                 ORDER BY s.name
             """, (uid,))
             sets_rows = cur.fetchall()
@@ -1174,10 +1591,62 @@ async def run_digest(request: Request):
             """, (uid,))
             etb_rows = cur.fetchall()
 
-            if not sets_rows and not etb_rows:
+            # Chase card watchlist
+            cur.execute("""
+                SELECT
+                    cc.card_name,
+                    cc.id AS chase_card_id,
+                    s.name AS set_name,
+                    l.raw_gbp AS current_price,
+                    l.psa10_gbp,
+                    p.raw_gbp AS prev_price,
+                    l.snapshot_date
+                FROM chase_watchlist cw
+                JOIN chase_cards cc ON cc.id = cw.chase_card_id
+                JOIN sets s ON s.id = cc.set_id
+                LEFT JOIN LATERAL (
+                    SELECT raw_gbp, psa10_gbp, snapshot_date
+                    FROM chase_card_prices
+                    WHERE chase_card_id = cc.id AND raw_gbp IS NOT NULL
+                    ORDER BY snapshot_date DESC LIMIT 1
+                ) l ON true
+                LEFT JOIN LATERAL (
+                    SELECT raw_gbp
+                    FROM chase_card_prices
+                    WHERE chase_card_id = cc.id
+                      AND snapshot_date < (SELECT MAX(snapshot_date) FROM chase_card_prices)
+                    ORDER BY snapshot_date DESC LIMIT 1
+                ) p ON true
+                WHERE cw.user_id = %s
+                ORDER BY cc.card_name
+            """, (uid,))
+            chase_rows = cur.fetchall()
+
+            if not sets_rows and not etb_rows and not chase_rows:
                 continue
 
-            html = _build_digest_email(sets_rows, etb_rows, frequency_filter)
+            # Fetch daily movers for daily digest emails
+            daily_movers = None
+            if frequency_filter == "daily":
+                try:
+                    import urllib.request as _ur2, json as _json2
+                    with _ur2.urlopen("http://127.0.0.1:8000/api/movers/daily", timeout=5) as _r:
+                        daily_movers = _json2.loads(_r.read())
+                except Exception:
+                    pass
+
+            # Portfolio summary passed in from send_digest.py (per-user lookup done in endpoint)
+            import json as _json_port
+            portfolio_json_raw = request.query_params.get("portfolio_json", "")
+            portfolio_summary = None
+            if portfolio_json_raw:
+                try:
+                    import urllib.parse as _up_port
+                    portfolio_summary = _json_port.loads(_up_port.unquote_plus(portfolio_json_raw))
+                except Exception:
+                    pass
+
+            html = _build_digest_email(sets_rows, etb_rows, frequency_filter, chase_rows, daily_movers=daily_movers, portfolio_summary=portfolio_summary)
             label = {"daily": "Daily", "weekly": "Weekly", "monthly": "Monthly"}.get(frequency_filter, "Weekly")
             date_str = datetime.date.today().strftime("%d %b %Y")
             subject = f"Your TCGInvest {label} Watchlist — {date_str}"
@@ -1207,7 +1676,7 @@ async def run_digest(request: Request):
     return {"sent": sent, "errors": errors, "frequency": frequency_filter}
 
 
-def _build_digest_email(sets_rows, etb_rows, frequency: str) -> str:
+def _build_digest_email(sets_rows, etb_rows, frequency: str, chase_rows=None, daily_movers=None, portfolio_summary=None) -> str:
     def price_row(current, prev):
         if current is None:
             return "<span style='color:#888'>No data</span>"
@@ -1276,6 +1745,109 @@ def _build_digest_email(sets_rows, etb_rows, frequency: str) -> str:
           </tr>{rows}
         </table>"""
 
+    chase_html = ""
+    if chase_rows:
+        def grade_signal_badge(signal):
+            if signal == "worth_it":   return "<span style='color:#22c55e;font-weight:700'>✓ Worth it</span>"
+            if signal == "marginal":   return "<span style='color:#f59e0b;font-weight:700'>~ Marginal</span>"
+            if signal == "not_worth_it": return "<span style='color:#ef4444;font-weight:700'>✗ Skip</span>"
+            return "—"
+        def psa_price(p):
+            return f"£{p:.2f}" if p else "—"
+        rows_html = "".join(f"""
+          <tr>
+            <td style='padding:10px 8px;border-bottom:1px solid #222'>
+              <div style='color:#e5e7eb;font-weight:600;font-size:13px'>{r["card_name"]}</div>
+              <div style='color:#6b7280;font-size:11px'>{r["set_name"]}</div>
+            </td>
+            <td style='padding:10px 8px;border-bottom:1px solid #222;text-align:right'>{price_row(r["current_price"], r["prev_price"])}</td>
+            <td style='padding:10px 8px;border-bottom:1px solid #222;text-align:right;color:#a78bfa'>{psa_price(r["psa10_gbp"])}</td>
+          </tr>""" for r in chase_rows)
+        chase_html = f"""
+        <h2 style='color:#facc15;font-size:15px;margin:28px 0 10px'>✨ Chase Card Watchlist</h2>
+        <table width='100%' cellpadding='0' cellspacing='0' style='border-collapse:collapse;font-size:13px;color:#e5e7eb'>
+          <tr style='color:#6b7280;font-size:11px;text-transform:uppercase'>
+            <th style='padding:6px 8px;text-align:left'>Card</th>
+            <th style='padding:6px 8px;text-align:right'>Raw (Δ)</th>
+            <th style='padding:6px 8px;text-align:right'>PSA 10</th>
+          </tr>{rows_html}
+        </table>"""
+
+    # Build daily movers section (daily digest only)
+    movers_html = ""
+    if daily_movers and frequency == "daily":
+        risers  = (daily_movers.get("risers")  or [])[:5]
+        fallers = (daily_movers.get("fallers") or [])[:5]
+        def _mover_row(item, is_riser):
+            sign  = "+" if is_riser else ""
+            color = "#22c55e" if is_riser else "#ef4444"
+            arrow = "\u25b2" if is_riser else "\u25bc"
+            logo_url = item.get("logo_url", "")
+            logo  = ('<img src="' + logo_url + '" height="20" style="vertical-align:middle;margin-right:6px" />') if logo_url else ""
+            name  = item.get("set_name", "")
+            price = "\u00a3" + "{:.2f}".format(float(item.get("price_gbp", 0)))
+            pct   = sign + "{:.2f}%".format(float(item.get("change_pct_24h", 0)))
+            td_base = "padding:8px;border-bottom:1px solid #222"
+            return (
+                "<tr>"
+                + "<td style='" + td_base + "'>" + logo + "<span style='color:#e5e7eb;font-size:13px'>" + name + "</span></td>"
+                + "<td style='" + td_base + ";text-align:right;color:#e5e7eb;font-size:13px'>" + price + "</td>"
+                + "<td style='" + td_base + ";text-align:right;color:" + color + ";font-weight:700;font-size:13px'>" + arrow + " " + pct + "</td>"
+                + "</tr>"
+            )
+        if risers or fallers:
+            r_rows = "".join(_mover_row(r, True)  for r in risers)
+            f_rows = "".join(_mover_row(r, False) for r in fallers)
+            movers_html = f"""
+        <h2 style='color:#facc15;font-size:15px;margin:28px 0 10px'>📈 Today&apos;s Movers</h2>
+        <table width='100%' cellpadding='0' cellspacing='0' style='border-collapse:collapse;font-size:13px;color:#e5e7eb;margin-bottom:12px'>
+          <tr style='color:#6b7280;font-size:11px;text-transform:uppercase'>
+            <th style='padding:6px 8px;text-align:left'>Set</th>
+            <th style='padding:6px 8px;text-align:right'>Price</th>
+            <th style='padding:6px 8px;text-align:right'>24h</th>
+          </tr>
+          <tr><td colspan='3' style='padding:4px 8px;color:#22c55e;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em'>Risers</td></tr>
+          {r_rows}
+          <tr><td colspan='3' style='padding:4px 8px;color:#ef4444;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em'>Fallers</td></tr>
+          {f_rows}
+        </table>"""
+
+    
+    # Portfolio summary section
+    portfolio_html = ""
+    if portfolio_summary and isinstance(portfolio_summary, dict):
+        total_val = portfolio_summary.get("total_current_gbp", 0)
+        total_gain = portfolio_summary.get("total_gain_gbp", 0)
+        total_gain_pct = portfolio_summary.get("total_gain_pct", 0)
+        best = portfolio_summary.get("best_performer")
+        worst = portfolio_summary.get("worst_performer")
+        gain_col = "#22c55e" if total_gain >= 0 else "#ef4444"
+        gain_sign = "+" if total_gain >= 0 else ""
+        best_row = ""
+        if best:
+            bsign = "+" if best.get("gain_gbp", 0) >= 0 else ""
+            bcol = "#22c55e" if best.get("gain_gbp", 0) >= 0 else "#ef4444"
+            best_row = f"<tr><td style='padding:6px 8px;color:#9ca3af'>Best Performer</td><td style='padding:6px 8px;text-align:right'>{best.get('product_name','—')}</td><td style='padding:6px 8px;text-align:right;color:{bcol};font-weight:600'>{bsign}£{best.get('gain_gbp',0):.2f} ({bsign}{best.get('gain_pct',0):.1f}%)</td></tr>"
+        worst_row = ""
+        if worst:
+            wsign = "+" if worst.get("gain_gbp", 0) >= 0 else ""
+            wcol = "#22c55e" if worst.get("gain_gbp", 0) >= 0 else "#ef4444"
+            worst_row = f"<tr><td style='padding:6px 8px;color:#9ca3af'>Worst Performer</td><td style='padding:6px 8px;text-align:right'>{worst.get('product_name','—')}</td><td style='padding:6px 8px;text-align:right;color:{wcol};font-weight:600'>{wsign}£{worst.get('gain_gbp',0):.2f} ({wsign}{worst.get('gain_pct',0):.1f}%)</td></tr>"
+        portfolio_html = f"""
+        <h2 style='color:#facc15;font-size:15px;margin:28px 0 10px'>💼 My Portfolio</h2>
+        <div style='background:#1a1f2e;border:1px solid #2d3748;border-radius:8px;padding:14px;margin-bottom:8px'>
+          <table width='100%' cellpadding='0' cellspacing='0' style='font-size:13px;color:#e5e7eb'>
+            <tr>
+              <td style='padding:6px 8px;color:#9ca3af'>Portfolio Value</td>
+              <td style='padding:6px 8px;text-align:right'><b style='color:#fff'>£{total_val:.2f}</b></td>
+              <td style='padding:6px 8px;text-align:right;color:{gain_col};font-weight:600'>{gain_sign}£{total_gain:.2f} ({gain_sign}{total_gain_pct:.1f}%)</td>
+            </tr>
+            {best_row}
+            {worst_row}
+          </table>
+        </div>
+        <a href='https://tcginvest.uk/account/portfolio' style='color:#facc15;font-size:12px;text-decoration:none'>View full portfolio →</a>"""
+
     return f"""<!DOCTYPE html>
 <html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'></head>
 <body style='margin:0;padding:0;background:#0a0a0a;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif'>
@@ -1288,8 +1860,11 @@ def _build_digest_email(sets_rows, etb_rows, frequency: str) -> str:
   </td></tr>
   <tr><td style='background:#111;padding:24px 32px'>
     <p style='color:#d1d5db;font-size:14px;margin:0'>Here's your update on the sets and ETBs you're watching.</p>
+    {movers_html}
     {sets_html}
     {etbs_html}
+    {chase_html}
+    {portfolio_html}
     <div style='margin:28px 0 0;text-align:center'>
       <a href='https://tcginvest.uk/tools/tracker'
          style='display:inline-block;background:#facc15;color:#000;font-weight:700;font-size:14px;padding:12px 28px;border-radius:8px;text-decoration:none'>
@@ -1308,3 +1883,1343 @@ def _build_digest_email(sets_rows, etb_rows, frequency: str) -> str:
 </td></tr>
 </table>
 </body></html>"""
+
+
+# ─── BLOG ─────────────────────────────────────────────────────────────────────
+
+class BlogPostCreate(BaseModel):
+    slug: str
+    title: str
+    description: str
+    category: str
+    date: str
+    content_md: str
+    read_time: int = 5
+    featured: bool = False
+    published: bool = True
+
+@app.get("/api/blog")
+def get_blog_posts(limit: int = Query(default=20, ge=1, le=100), featured_only: bool = False):
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        if featured_only:
+            cur.execute("""
+                SELECT id, slug, title, description, category, date, read_time, featured, published, created_at
+                FROM blog_posts
+                WHERE published = TRUE AND featured = TRUE
+                ORDER BY date DESC, created_at DESC
+                LIMIT %s
+            """, (limit,))
+        else:
+            cur.execute("""
+                SELECT id, slug, title, description, category, date, read_time, featured, published, created_at
+                FROM blog_posts
+                WHERE published = TRUE
+                ORDER BY date DESC, created_at DESC
+                LIMIT %s
+            """, (limit,))
+        posts = [dict(r) for r in cur.fetchall()]
+        # Convert dates to ISO strings
+        for p in posts:
+            if p.get("date"):
+                p["date"] = p["date"].isoformat()
+            if p.get("created_at"):
+                p["created_at"] = p["created_at"].isoformat()
+        return {"count": len(posts), "posts": posts}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        conn.close()
+
+@app.get("/api/blog/{slug}")
+def get_blog_post(slug: str):
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, slug, title, description, category, date, content_md, read_time, featured, published, created_at, updated_at
+            FROM blog_posts
+            WHERE slug = %s AND published = TRUE
+        """, (slug,))
+        post = cur.fetchone()
+        if not post:
+            raise HTTPException(status_code=404, detail="Post not found")
+        p = dict(post)
+        if p.get("date"):
+            p["date"] = p["date"].isoformat()
+        if p.get("created_at"):
+            p["created_at"] = p["created_at"].isoformat()
+        if p.get("updated_at"):
+            p["updated_at"] = p["updated_at"].isoformat()
+        return p
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        conn.close()
+
+@app.post("/api/blog")
+def create_blog_post(post: BlogPostCreate, _: str = Depends(require_api_key)):
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO blog_posts (slug, title, description, category, date, content_md, read_time, featured, published)
+            VALUES (%(slug)s, %(title)s, %(description)s, %(category)s, %(date)s, %(content_md)s, %(read_time)s, %(featured)s, %(published)s)
+            ON CONFLICT (slug) DO UPDATE SET
+              title=EXCLUDED.title, description=EXCLUDED.description, category=EXCLUDED.category,
+              date=EXCLUDED.date, content_md=EXCLUDED.content_md, read_time=EXCLUDED.read_time,
+              featured=EXCLUDED.featured, published=EXCLUDED.published, updated_at=NOW()
+            RETURNING id, slug
+        """, post.dict())
+        row = cur.fetchone()
+        conn.commit()
+        return {"ok": True, "id": row["id"], "slug": row["slug"]}
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        conn.close()
+
+
+# ─── CACHE CLEAR (called by n8n after blog post publish) ──────────────────────
+
+@app.post("/api/admin/clear-cache")
+def clear_cache(_: str = Depends(require_api_key)):
+    import subprocess
+    try:
+        subprocess.run(
+            ["rm", "-rf", "/root/.openclaw/frontend/.next/cache"],
+            check=True
+        )
+        subprocess.run(
+            ["/usr/lib/node_modules/pm2/bin/pm2", "restart", "tcginvest-frontend"],
+            check=True
+        )
+        return {"ok": True, "message": "Cache cleared and frontend restarted"}
+    except subprocess.CalledProcessError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ─── CHASE CARDS ──────────────────────────────────────────────────────────────
+
+GRADING_FEE_GBP = 20.0  # PSA standard tier assumption
+
+@app.get("/api/chase-cards")
+def get_chase_cards(_: str = Depends(require_api_key)):
+    """
+    Returns top 3 chase cards per set (by current raw_gbp DESC).
+    Includes grading metrics computed at query time.
+    """
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+
+        # Latest snapshot date per card
+        cur.execute("""
+            WITH latest AS (
+                SELECT DISTINCT ON (chase_card_id)
+                    chase_card_id,
+                    snapshot_date,
+                    raw_gbp,
+                    psa10_gbp,
+                    usd_gbp_rate
+                FROM chase_card_prices
+                WHERE raw_gbp IS NOT NULL
+                ORDER BY chase_card_id, snapshot_date DESC
+            ),
+            prev AS (
+                SELECT DISTINCT ON (chase_card_id)
+                    chase_card_id,
+                    raw_gbp   AS prev_raw_gbp,
+                    psa10_gbp AS prev_psa10_gbp
+                FROM chase_card_prices
+                WHERE raw_gbp IS NOT NULL
+                  AND snapshot_date < (SELECT MAX(snapshot_date) FROM chase_card_prices)
+                ORDER BY chase_card_id, snapshot_date DESC
+            ),
+            ranked AS (
+                SELECT
+                    cc.id,
+                    cc.set_id,
+                    s.name          AS set_name,
+                    s.era,
+                    cc.card_name,
+                    cc.card_number,
+                    cc.rarity,
+                    cc.pull_rate_per_box,
+                    cc.image_url,
+                    cc.pc_path,
+                    s.logo_url,
+                    l.raw_gbp,
+                    l.psa10_gbp,
+                    l.snapshot_date,
+                    p.prev_raw_gbp,
+                    p.prev_psa10_gbp,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY cc.set_id
+                        ORDER BY l.raw_gbp DESC NULLS LAST
+                    ) AS rank
+                FROM chase_cards cc
+                JOIN sets s ON s.id = cc.set_id
+                LEFT JOIN latest l ON l.chase_card_id = cc.id
+                LEFT JOIN prev   p ON p.chase_card_id = cc.id
+                WHERE cc.active = TRUE
+            )
+            SELECT * FROM ranked WHERE rank <= 3
+            ORDER BY set_id, rank
+        """)
+
+        rows = cur.fetchall()
+
+        result_by_set = {}
+        for row in rows:
+            r = dict(row)
+            sid = r["set_id"]
+
+            raw_gbp   = float(r["raw_gbp"])   if r["raw_gbp"]   else None
+            psa10_gbp = float(r["psa10_gbp"]) if r["psa10_gbp"] else None
+
+            # Grading metrics
+            grade_mult = None
+            grade_roi_gbp = None
+            grade_roi_pct = None
+            grade_signal  = None
+
+            if raw_gbp and psa10_gbp and raw_gbp > 0:
+                grade_mult    = round(psa10_gbp / raw_gbp, 2)
+                grade_roi_gbp = round(psa10_gbp - raw_gbp - GRADING_FEE_GBP, 2)
+                grade_roi_pct = round((grade_roi_gbp / (raw_gbp + GRADING_FEE_GBP)) * 100, 1)
+                if grade_roi_gbp > 30:
+                    grade_signal = "worth_it"
+                elif grade_roi_gbp > 0:
+                    grade_signal = "marginal"
+                else:
+                    grade_signal = "not_worth_it"
+
+            # Pull EV contribution
+            pull_ev = None
+            if raw_gbp and r["pull_rate_per_box"]:
+                pull_ev = round(raw_gbp * float(r["pull_rate_per_box"]), 2)
+
+            # 7d deltas
+            raw_delta_pct   = None
+            psa10_delta_pct = None
+            if raw_gbp and r["prev_raw_gbp"]:
+                prev = float(r["prev_raw_gbp"])
+                if prev > 0:
+                    raw_delta_pct = round((raw_gbp - prev) / prev * 100, 1)
+            if psa10_gbp and r["prev_psa10_gbp"]:
+                prev = float(r["prev_psa10_gbp"])
+                if prev > 0:
+                    psa10_delta_pct = round((psa10_gbp - prev) / prev * 100, 1)
+
+            card_data = {
+                "id":            r["id"],
+                "card_name":     r["card_name"],
+                "card_number":   r["card_number"],
+                "rarity":        r["rarity"],
+                "image_url":     r["image_url"],
+                "raw_gbp":       raw_gbp,
+                "psa10_gbp":     psa10_gbp,
+                "raw_delta_pct": raw_delta_pct,
+                "psa10_delta_pct": psa10_delta_pct,
+                "grade_mult":    grade_mult,
+                "grade_roi_gbp": grade_roi_gbp,
+                "grade_roi_pct": grade_roi_pct,
+                "grade_signal":  grade_signal,
+                "pull_rate":     float(r["pull_rate_per_box"]) if r["pull_rate_per_box"] else None,
+                "pull_ev":       pull_ev,
+                "snapshot_date": r["snapshot_date"].isoformat() if r["snapshot_date"] else None,
+                "rank":          r["rank"],
+                "pc_path":       r["pc_path"],
+            }
+
+            if sid not in result_by_set:
+                result_by_set[sid] = {
+                    "set_id":   sid,
+                    "set_name": r["set_name"],
+                    "era":      r["era"],
+                    "logo_url": r["logo_url"],
+                    "cards":    [],
+                }
+            result_by_set[sid]["cards"].append(card_data)
+
+        # Add top3_pull_ev per set
+        sets_list = []
+        for sid, sdata in result_by_set.items():
+            evs = [c["pull_ev"] for c in sdata["cards"] if c["pull_ev"]]
+            sdata["top3_pull_ev"] = round(sum(evs), 2) if evs else None
+            sets_list.append(sdata)
+
+        return {"sets": sets_list, "grading_fee_gbp": GRADING_FEE_GBP}
+    finally:
+        conn.close()
+
+
+@app.post("/api/admin/set-role")
+def admin_set_role(payload: dict, _: str = Depends(require_api_key)):
+    email = payload.get("email", "").strip().lower()
+    role  = payload.get("role", "").strip().lower()
+    if not email or role not in ("free", "premium", "admin"):
+        raise HTTPException(status_code=400, detail="email and role (free|premium|admin) required")
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE users SET role = %s WHERE LOWER(email) = %s RETURNING id, email, role", (role, email))
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail=f"User {email} not found")
+            conn.commit()
+            return {"ok": True, "id": row["id"], "email": row["email"], "role": row["role"]}
+    finally:
+        conn.close()
+
+
+# ─── Chase Card Watchlist ─────────────────────────────────────────────────────
+
+CHASE_WATCHLIST_FREE_LIMIT = 5
+
+@app.get("/api/chase-watchlist")
+def get_chase_watchlist(user=Depends(require_auth)):
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT chase_card_id FROM chase_watchlist WHERE user_id = %s ORDER BY created_at DESC",
+            (user["id"],)
+        )
+        rows = cur.fetchall()
+        return {"watchlist": [r["chase_card_id"] for r in rows]}
+    finally:
+        conn.close()
+
+@app.post("/api/chase-watchlist/{chase_card_id}")
+def add_to_chase_watchlist(chase_card_id: int, user=Depends(require_auth)):
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        if user.get("role") == "free":
+            cur.execute("SELECT COUNT(*) as c FROM chase_watchlist WHERE user_id = %s", (user["id"],))
+            count = cur.fetchone()["c"]
+            if count >= CHASE_WATCHLIST_FREE_LIMIT:
+                raise HTTPException(status_code=403, detail=f"Free tier limited to {CHASE_WATCHLIST_FREE_LIMIT} chase card watchlist items. Upgrade to premium for unlimited.")
+        cur.execute(
+            "INSERT INTO chase_watchlist (user_id, chase_card_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+            (user["id"], chase_card_id)
+        )
+        conn.commit()
+        return {"starred": True}
+    finally:
+        conn.close()
+
+@app.delete("/api/chase-watchlist/{chase_card_id}")
+def remove_from_chase_watchlist(chase_card_id: int, user=Depends(require_auth)):
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "DELETE FROM chase_watchlist WHERE user_id = %s AND chase_card_id = %s",
+            (user["id"], chase_card_id)
+        )
+        conn.commit()
+        return {"starred": False}
+    finally:
+        conn.close()
+
+
+@app.get("/api/chase-movers")
+def get_chase_movers(_: str = Depends(require_api_key)):
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        # Get the two most recent distinct snapshot dates
+        cur.execute("""
+            SELECT DISTINCT snapshot_date FROM chase_card_prices
+            ORDER BY snapshot_date DESC LIMIT 2
+        """)
+        dates = [row["snapshot_date"] for row in cur.fetchall()]
+        if len(dates) < 2:
+            return {"latest": dates[0].isoformat() if dates else None, "previous": None, "movers": []}
+
+        latest   = dates[0]
+        previous = dates[1]
+
+        # Get all cards with prices on both dates
+        cur.execute("""
+            SELECT
+                cc.id,
+                cc.card_name,
+                cc.card_number,
+                s.name AS set_name,
+                s.era,
+                curr.raw_gbp,
+                prev.raw_gbp AS prev_raw_gbp,
+                curr.psa10_gbp,
+                curr.snapshot_date
+            FROM chase_cards cc
+            JOIN sets s ON s.id = cc.set_id
+            JOIN chase_card_prices curr ON curr.chase_card_id = cc.id AND curr.snapshot_date = %s
+            JOIN chase_card_prices prev ON prev.chase_card_id = cc.id AND prev.snapshot_date = %s
+            WHERE cc.active = TRUE
+              AND curr.raw_gbp IS NOT NULL
+              AND prev.raw_gbp IS NOT NULL
+              AND prev.raw_gbp > 0
+        """, (latest, previous))
+        rows = cur.fetchall()
+
+        movers = []
+        for row in rows:
+            raw_delta_pct = round((row["raw_gbp"] - row["prev_raw_gbp"]) / row["prev_raw_gbp"] * 100, 1)
+            grade_mult = None
+            if row["raw_gbp"] and row["psa10_gbp"] and row["raw_gbp"] > 0:
+                grade_mult = round(row["psa10_gbp"] / row["raw_gbp"], 2)
+            movers.append({
+                "id":            row["id"],
+                "card_name":     row["card_name"],
+                "card_number":   row["card_number"],
+                "set_name":      row["set_name"],
+                "era":           row["era"],
+                "raw_gbp":       row["raw_gbp"],
+                "prev_raw_gbp":  row["prev_raw_gbp"],
+                "psa10_gbp":     row["psa10_gbp"],
+                "raw_delta_pct": raw_delta_pct,
+                "grade_mult":    grade_mult,
+            })
+
+        return {
+            "latest":   latest.isoformat(),
+            "previous": previous.isoformat(),
+            "movers":   movers,
+        }
+    finally:
+        conn.close()
+
+
+# ── Chase Card Individual Page endpoints ──────────────────────────────────────
+
+@app.get("/api/chase-cards/{card_id}")
+def get_chase_card_detail(card_id: int, _: str = Depends(require_api_key)):
+    """Full card detail for individual card page. Premium gate is frontend-only."""
+    from psycopg2.extras import RealDictCursor as _RDC
+    conn = get_db()
+    try:
+        cur = conn.cursor(cursor_factory=_RDC)
+        cur.execute("""
+            SELECT
+                cc.id,
+                cc.card_name,
+                s.name AS set_name,
+                cc.image_url,
+                cc.pull_rate_per_box,
+                ccp.raw_gbp,
+                ccp.psa10_gbp,
+                ccp.snapshot_date,
+                s.chase_cards_json
+            FROM chase_cards cc
+            JOIN sets s ON s.id = cc.set_id
+            LEFT JOIN LATERAL (
+                SELECT raw_gbp, psa10_gbp, snapshot_date
+                FROM chase_card_prices
+                WHERE chase_card_id = cc.id AND raw_gbp IS NOT NULL
+                ORDER BY snapshot_date DESC
+                LIMIT 1
+            ) ccp ON TRUE
+            WHERE cc.id = %s AND cc.active = TRUE
+        """, (card_id,))
+        row = cur.fetchone()
+        if not row:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404, detail="Card not found")
+
+        GRADING_FEE_GBP = 20.0
+        raw = float(row["raw_gbp"]) if row["raw_gbp"] is not None else None
+        psa10 = float(row["psa10_gbp"]) if row["psa10_gbp"] is not None else None
+        grade_roi_gbp = None
+        grade_signal = None
+        if raw is not None and psa10 is not None:
+            grade_roi_gbp = round(psa10 - raw - GRADING_FEE_GBP, 2)
+            if grade_roi_gbp >= 30:
+                grade_signal = "worth_it"
+            elif grade_roi_gbp >= 0:
+                grade_signal = "marginal"
+            else:
+                grade_signal = "not_worth_it"
+
+        # Extract rarity from chase_cards_json if available
+        rarity = None
+        card_type = None
+        card_stage = None
+        chase_json = row.get("chase_cards_json")
+        if chase_json:
+            import json as _json
+            cards_list = chase_json if isinstance(chase_json, list) else _json.loads(chase_json)
+            for entry in cards_list:
+                if isinstance(entry, dict) and entry.get("name", "").lower() in row["card_name"].lower():
+                    rarity = entry.get("rarity")
+                    card_type = entry.get("type")
+                    card_stage = entry.get("stage")
+                    break
+
+        return {
+            "id": row["id"],
+            "card_name": row["card_name"],
+            "set_name": row["set_name"],
+            "image_url": row["image_url"],
+            "pull_rate_per_box": float(row["pull_rate_per_box"]) if row["pull_rate_per_box"] is not None else None,
+            "raw_gbp": raw,
+            "psa10_gbp": psa10,
+            "grade_roi_gbp": grade_roi_gbp,
+            "grade_signal": grade_signal,
+            "snapshot_date": str(row["snapshot_date"]) if row["snapshot_date"] else None,
+            "rarity": rarity,
+            "card_type": card_type,
+            "card_stage": card_stage,
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/api/chase-cards/{card_id}/history")
+def get_chase_card_history(card_id: int, _: str = Depends(require_api_key)):
+    """Last 12 price snapshots for the card."""
+    from psycopg2.extras import RealDictCursor as _RDC
+    conn = get_db()
+    try:
+        cur = conn.cursor(cursor_factory=_RDC)
+        # Verify card exists
+        cur.execute("SELECT id FROM chase_cards WHERE id = %s AND active = TRUE", (card_id,))
+        if not cur.fetchone():
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404, detail="Card not found")
+
+        cur.execute("""
+            SELECT snapshot_date, raw_gbp, psa10_gbp
+            FROM chase_card_prices
+            WHERE chase_card_id = %s AND raw_gbp IS NOT NULL
+            ORDER BY snapshot_date DESC
+            LIMIT 12
+        """, (card_id,))
+        rows = cur.fetchall()
+        return {
+            "card_id": card_id,
+            "history": [
+                {
+                    "snapshot_date": str(r["snapshot_date"]),
+                    "raw_gbp": float(r["raw_gbp"]) if r["raw_gbp"] is not None else None,
+                    "psa10_gbp": float(r["psa10_gbp"]) if r["psa10_gbp"] is not None else None,
+                }
+                for r in rows
+            ]
+        }
+    finally:
+        conn.close()
+
+
+# ── Momentum endpoint ─────────────────────────────────────────────────────────
+
+
+
+@app.get("/api/movers/daily")
+def get_daily_movers():
+    """
+    24-hour booster box price movers powered by tcgcsv_prices.
+    No auth required — free data, drives SEO.
+    Returns top 5 risers and top 5 fallers by % change.
+    If fewer than 2 days of data exist, returns empty lists with a data_note.
+    """
+    import urllib.request as _ur, json as _json
+    from psycopg2.extras import RealDictCursor as _RDC
+    import os as _os
+
+    conn = get_db()
+    try:
+        cur = conn.cursor(cursor_factory=_RDC)
+
+        # --- FX rate (USD → GBP) ---
+        fx_rate = 0.79
+        try:
+            with _ur.urlopen("https://open.er-api.com/v6/latest/USD", timeout=5) as resp:
+                fx_rate = float(_json.loads(resp.read())["rates"]["GBP"])
+        except Exception:
+            pass
+
+        # --- Find the two most recent distinct snapshot dates in tcgcsv_prices ---
+        cur.execute("""
+            SELECT DISTINCT snapshot_date
+            FROM tcgcsv_prices
+            WHERE sub_type_name = 'Normal' AND market_price_usd IS NOT NULL
+            ORDER BY snapshot_date DESC
+            LIMIT 2
+        """)
+        date_rows = cur.fetchall()
+
+        if len(date_rows) < 2:
+            only_date = date_rows[0]["snapshot_date"].isoformat() if date_rows else None
+            return {
+                "as_of": only_date,
+                "risers": [],
+                "fallers": [],
+                "data_note": "Fewer than 2 days of price data available — check back tomorrow."
+            }
+
+        today_date = date_rows[0]["snapshot_date"]
+        yest_date  = date_rows[1]["snapshot_date"]
+
+        # --- Slugify helper (mirrors frontend pattern) ---
+        def slugify(name: str) -> str:
+            import re
+            s = name.lower()
+            s = s.replace(" & ", "-and-").replace("&", "and")
+            s = re.sub(r"['\"():.!?]", "", s)
+            s = re.sub(r"[^a-z0-9]+", "-", s)
+            s = s.strip("-")
+            return s
+
+        # --- Pull today + yesterday prices for all sets that have a bb_product_id ---
+        cur.execute("""
+            SELECT
+                s.name        AS set_name,
+                s.logo_url,
+                t.market_price_usd  AS today_usd,
+                y.market_price_usd  AS yest_usd
+            FROM sets s
+            JOIN tcgcsv_prices t
+                ON t.product_id = s.tcgcsv_bb_product_id
+               AND t.snapshot_date = %s
+               AND t.sub_type_name = 'Normal'
+               AND t.market_price_usd IS NOT NULL
+            JOIN tcgcsv_prices y
+                ON y.product_id = s.tcgcsv_bb_product_id
+               AND y.snapshot_date = %s
+               AND y.sub_type_name = 'Normal'
+               AND y.market_price_usd IS NOT NULL
+            WHERE s.tcgcsv_bb_product_id IS NOT NULL
+        """, (today_date, yest_date))
+        rows = cur.fetchall()
+
+        results = []
+        for r in rows:
+            t_usd = float(r["today_usd"])
+            y_usd = float(r["yest_usd"])
+            if y_usd == 0:
+                continue
+            change_pct = round(((t_usd - y_usd) / y_usd) * 100, 2)
+            results.append({
+                "set_name":       r["set_name"],
+                "slug":           slugify(r["set_name"]),
+                "logo_url":       r["logo_url"],
+                "price_gbp":      round(t_usd * fx_rate, 2),
+                "change_pct_24h": change_pct,
+            })
+
+        results.sort(key=lambda x: x["change_pct_24h"], reverse=True)
+        risers  = results[:5]
+        fallers = list(reversed(results))[:5]
+
+        return {
+            "as_of":   today_date.isoformat(),
+            "previous_date": yest_date.isoformat(),
+            "risers":  risers,
+            "fallers": fallers,
+        }
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# ROI Calculator endpoint
+# ---------------------------------------------------------------------------
+from pydantic import BaseModel as _PydanticBase
+from datetime import date as _date, timedelta as _timedelta
+
+class RoiRequest(_PydanticBase):
+    set_id: int
+    purchase_date: str          # ISO date string e.g. "2024-06-15"
+    purchase_price_gbp: float   # total spend (all boxes)
+    quantity: int
+
+@app.post("/api/roi/calculate")
+def roi_calculate(req: RoiRequest):
+    """
+    Historical ROI calculation for a booster box investment.
+    Uses tcgcsv_prices to look up price at purchase date and build a weekly
+    time series from purchase_date to today (max 104 points).
+    Returns absolute/% gain, annualised return, and S&P 500 benchmark.
+    """
+    from psycopg2.extras import RealDictCursor as _RDC
+    import math as _math
+
+    EARLIEST_DATE = _date(2024, 2, 8)
+    SP500_ANNUAL  = 0.10          # 10 % p.a. compound benchmark
+
+    conn = get_db()
+    try:
+        cur = conn.cursor(cursor_factory=_RDC)
+
+        # 1. Get set info + tcgcsv product id
+        cur.execute(
+            "SELECT id, name, tcgcsv_bb_product_id FROM sets WHERE id = %s",
+            (req.set_id,)
+        )
+        s = cur.fetchone()
+        if not s:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404, detail="Set not found")
+
+        bb_pid = s["tcgcsv_bb_product_id"]
+        if not bb_pid:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=422, detail="No TCGCSV price data available for this set")
+
+        # 2. Parse purchase date; clamp to earliest available data
+        try:
+            purchase_date = _date.fromisoformat(req.purchase_date)
+        except ValueError:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=422, detail="Invalid purchase_date format")
+
+        used_earliest = False
+        if purchase_date < EARLIEST_DATE:
+            purchase_date = EARLIEST_DATE
+            used_earliest = True
+
+        today = _date.today()
+
+        # 3. Fetch all price rows for this product (USD + stored rate)
+        cur.execute("""
+            SELECT snapshot_date, market_price_usd, low_price_usd
+            FROM tcgcsv_prices
+            WHERE product_id = %s
+              AND sub_type_name = 'Normal'
+              AND market_price_usd IS NOT NULL
+            ORDER BY snapshot_date ASC
+        """, (bb_pid,))
+        all_rows = cur.fetchall()
+
+        if not all_rows:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=422, detail="No price history found for this set")
+
+        # 4. Live FX rate (USD -> GBP)
+        fx_rate = 0.79
+        try:
+            import urllib.request as _ur, json as _js
+            with _ur.urlopen("https://open.er-api.com/v6/latest/USD", timeout=5) as resp:
+                fx_rate = float(_js.loads(resp.read())["rates"]["GBP"])
+        except Exception:
+            pass
+
+        # Helper: find closest row to a target date
+        def closest_row(target):
+            best = None
+            best_diff = 99999
+            for r in all_rows:
+                diff = abs((r["snapshot_date"] - target).days)
+                if diff < best_diff:
+                    best_diff = diff
+                    best = r
+            return best
+
+        # 5. Price at purchase date
+        purchase_row = closest_row(purchase_date)
+        if not purchase_row:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=422, detail="Could not find historical price near purchase date")
+
+        purchase_price_usd = float(purchase_row["market_price_usd"])
+        purchase_price_gbp_per_box = purchase_price_usd * fx_rate
+        # Use the user-supplied total spend to derive per-box cost basis
+        cost_basis_per_box = req.purchase_price_gbp / req.quantity
+
+        # 6. Current price
+        current_row = all_rows[-1]
+        current_price_usd = float(current_row["market_price_usd"])
+        current_price_gbp = current_price_usd * fx_rate
+
+        # 7. Calculate metrics
+        current_value = current_price_gbp * req.quantity
+        purchase_value = req.purchase_price_gbp
+        abs_gain_gbp = current_value - purchase_value
+        pct_return = ((current_value / purchase_value) - 1) * 100 if purchase_value > 0 else 0
+
+        # Annualised return
+        years_held = (today - purchase_date).days / 365.25
+        if years_held >= (1/52):  # at least 1 week
+            ann_return = ((_math.pow(current_value / purchase_value, 1 / years_held)) - 1) * 100
+        else:
+            ann_return = pct_return  # too short to annualise meaningfully
+
+        # S&P 500 equivalent value (10% p.a. compound)
+        sp500_value = purchase_value * (_math.pow(1 + SP500_ANNUAL, years_held))
+        sp500_gain_gbp = sp500_value - purchase_value
+
+        # 8. Weekly time series from purchase_date to today (max 104 points)
+        series = []
+        cursor_date = purchase_date
+        one_week = _timedelta(weeks=1)
+        while cursor_date <= today and len(series) < 104:
+            row = closest_row(cursor_date)
+            if row:
+                price_gbp = float(row["market_price_usd"]) * fx_rate * req.quantity
+                # S&P benchmark value at this point in time
+                t = (cursor_date - purchase_date).days / 365.25
+                sp_val = purchase_value * (_math.pow(1 + SP500_ANNUAL, t)) if t > 0 else purchase_value
+                series.append({
+                    "date": str(cursor_date),
+                    "portfolio_gbp": round(price_gbp, 2),
+                    "sp500_gbp": round(sp_val, 2),
+                })
+            cursor_date += one_week
+
+        # Ensure today is always the last point
+        if series and series[-1]["date"] != str(today):
+            sp_val_today = purchase_value * (_math.pow(1 + SP500_ANNUAL, years_held)) if years_held > 0 else purchase_value
+            series.append({
+                "date": str(today),
+                "portfolio_gbp": round(current_value, 2),
+                "sp500_gbp": round(sp_val_today, 2),
+            })
+
+        return {
+            "set_name": s["name"],
+            "set_id": req.set_id,
+            "purchase_date": str(purchase_date),
+            "used_earliest_date": used_earliest,
+            "quantity": req.quantity,
+            "purchase_value_gbp": round(purchase_value, 2),
+            "current_value_gbp": round(current_value, 2),
+            "current_price_gbp": round(current_price_gbp, 2),
+            "abs_gain_gbp": round(abs_gain_gbp, 2),
+            "pct_return": round(pct_return, 2),
+            "ann_return": round(ann_return, 2),
+            "years_held": round(years_held, 2),
+            "sp500_value_gbp": round(sp500_value, 2),
+            "sp500_gain_gbp": round(sp500_gain_gbp, 2),
+            "fx_rate": round(fx_rate, 4),
+            "series": series,
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/api/roi/sets")
+def roi_sets():
+    """Returns sets that have tcgcsv booster box price data (for ROI calculator dropdown)."""
+    from psycopg2.extras import RealDictCursor as _RDC
+    conn = get_db()
+    try:
+        cur = conn.cursor(cursor_factory=_RDC)
+        cur.execute("""
+            SELECT id, name, era, logo_url, date_released
+            FROM sets
+            WHERE tcgcsv_bb_product_id IS NOT NULL
+            ORDER BY date_released DESC NULLS LAST
+        """)
+        rows = cur.fetchall()
+        return {"sets": [dict(r) for r in rows]}
+    finally:
+        conn.close()
+
+
+@app.get("/api/sets/{set_id}/heat")
+def get_set_heat(set_id: int, api_key: str = Depends(require_api_key)):
+    """
+    Returns the latest heat score + component breakdown for a set.
+    Premium-gated via API key — frontend calls this server-side.
+    """
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT h.set_id, h.score_date, h.heat_score,
+                   h.bb_trend_score, h.chase_trend_score, h.pull_rate_score
+            FROM set_heat_scores h
+            WHERE h.set_id = %s
+            ORDER BY h.score_date DESC
+            LIMIT 1
+        """, (set_id,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="No heat score found for this set")
+        return {
+            "set_id": row["set_id"],
+            "score_date": str(row["score_date"]),
+            "heat_score": float(row["heat_score"]),
+            "bb_trend_score": float(row["bb_trend_score"]) if row["bb_trend_score"] is not None else None,
+            "chase_trend_score": float(row["chase_trend_score"]) if row["chase_trend_score"] is not None else None,
+            "pull_rate_score": float(row["pull_rate_score"]) if row["pull_rate_score"] is not None else None,
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/api/heat-scores")
+def get_all_heat_scores(api_key: str = Depends(require_api_key)):
+    """
+    Returns today's heat score for every set, keyed by set_id.
+    Used by the BB Tracker table to render the Heat column.
+    """
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT DISTINCT ON (set_id) set_id, heat_score, bb_trend_score, chase_trend_score, pull_rate_score, score_date
+            FROM set_heat_scores
+            ORDER BY set_id, score_date DESC
+        """)
+        rows = cur.fetchall()
+        return {
+            str(row["set_id"]): {
+                "heat_score": float(row["heat_score"]),
+                "bb_trend_score": float(row["bb_trend_score"]) if row["bb_trend_score"] is not None else None,
+                "chase_trend_score": float(row["chase_trend_score"]) if row["chase_trend_score"] is not None else None,
+                "pull_rate_score": float(row["pull_rate_score"]) if row["pull_rate_score"] is not None else None,
+                "score_date": str(row["score_date"]),
+            }
+            for row in rows
+        }
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# PORTFOLIO TRACKER  (Sprint 4 Batch 7)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/portfolio")
+def get_portfolio(user=Depends(get_current_user)):
+    """
+    List all active portfolio items for the authenticated user,
+    enriched with current market value from tcgcsv_prices (sets)
+    or etb_price_snapshots (etbs).
+    """
+    user_id = int(user["sub"])
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+
+        # Fetch live FX rate
+        fx_rate = 0.79
+        try:
+            import urllib.request as _req, json as _json
+            with _req.urlopen("https://open.er-api.com/v6/latest/USD", timeout=4) as r:
+                fx_rate = float(_json.loads(r.read())["rates"]["GBP"])
+        except Exception:
+            pass
+
+        cur.execute("""
+            SELECT id, product_type, product_id, product_name,
+                   purchase_price_gbp, quantity, purchase_date, notes, created_at
+            FROM portfolio_items
+            WHERE user_id = %s AND deleted_at IS NULL
+            ORDER BY created_at DESC
+        """, (user_id,))
+        items = cur.fetchall()
+
+        result = []
+        total_invested = 0.0
+        total_current = 0.0
+
+        for row in items:
+            pid = row["product_id"]
+            ptype = row["product_type"]
+            qty = row["quantity"]
+            purchase_price = float(row["purchase_price_gbp"])
+            current_price = None
+
+            if ptype == "set":
+                # Look up via tcgcsv_bb_product_id on sets table
+                cur.execute("""
+                    SELECT tcgcsv_bb_product_id FROM sets WHERE id = %s
+                """, (pid,))
+                set_row = cur.fetchone()
+                if set_row and set_row["tcgcsv_bb_product_id"]:
+                    tcgcsv_pid = set_row["tcgcsv_bb_product_id"]
+                    cur.execute("""
+                        SELECT market_price_usd FROM tcgcsv_prices
+                        WHERE product_id = %s AND sub_type_name = 'Normal'
+                          AND market_price_usd IS NOT NULL
+                        ORDER BY snapshot_date DESC LIMIT 1
+                    """, (tcgcsv_pid,))
+                    price_row = cur.fetchone()
+                    if price_row:
+                        current_price = round(float(price_row["market_price_usd"]) * fx_rate, 2)
+            elif ptype == "etb":
+                # ETB: use etb_price_snapshots
+                cur.execute("""
+                    SELECT ebay_avg_sold_gbp FROM etb_price_snapshots
+                    WHERE etb_id = %s AND ebay_avg_sold_gbp IS NOT NULL
+                    ORDER BY snapshot_date DESC LIMIT 1
+                """, (pid,))
+                price_row = cur.fetchone()
+                if price_row:
+                    current_price = round(float(price_row["ebay_avg_sold_gbp"]), 2)
+            else:
+                # Chase card: use chase_card_prices
+                cur.execute("""
+                    SELECT raw_gbp FROM chase_card_prices
+                    WHERE chase_card_id = %s AND raw_gbp IS NOT NULL
+                    ORDER BY snapshot_date DESC LIMIT 1
+                """, (pid,))
+                price_row = cur.fetchone()
+                if price_row:
+                    current_price = round(float(price_row["raw_gbp"]), 2)
+
+            cost_basis = round(purchase_price * qty, 2)
+            current_value = round(current_price * qty, 2) if current_price else None
+            gain_gbp = round(current_value - cost_basis, 2) if current_value is not None else None
+            gain_pct = round((gain_gbp / cost_basis) * 100, 2) if (gain_gbp is not None and cost_basis > 0) else None
+
+            total_invested += cost_basis
+            if current_value is not None:
+                total_current += current_value
+
+            result.append({
+                "id": row["id"],
+                "product_type": ptype,
+                "product_id": pid,
+                "product_name": row["product_name"],
+                "purchase_price_gbp": purchase_price,
+                "quantity": qty,
+                "purchase_date": str(row["purchase_date"]),
+                "notes": row["notes"],
+                "created_at": str(row["created_at"]),
+                "current_price_gbp": current_price,
+                "cost_basis_gbp": cost_basis,
+                "current_value_gbp": current_value,
+                "gain_gbp": gain_gbp,
+                "gain_pct": gain_pct,
+            })
+
+        total_gain = round(total_current - total_invested, 2)
+        total_gain_pct = round((total_gain / total_invested) * 100, 2) if total_invested > 0 else 0.0
+
+        return {
+            "items": result,
+            "summary": {
+                "total_invested_gbp": round(total_invested, 2),
+                "total_current_gbp": round(total_current, 2),
+                "total_gain_gbp": total_gain,
+                "total_gain_pct": total_gain_pct,
+            }
+        }
+    finally:
+        conn.close()
+
+
+@app.post("/api/portfolio")
+def add_portfolio_item(
+    product_type: str = Body(...),
+    product_id: int = Body(...),
+    product_name: str = Body(...),
+    purchase_price_gbp: float = Body(...),
+    quantity: int = Body(1),
+    purchase_date: str = Body(...),
+    notes: str = Body(None),
+    user=Depends(get_current_user),
+):
+    """Add a holding to the portfolio. Premium only."""
+    if user.get("role") not in ("premium", "admin"):
+        raise HTTPException(status_code=403, detail="PREMIUM_REQUIRED")
+    if product_type not in ("set", "etb", "chase"):
+        raise HTTPException(status_code=400, detail="product_type must be set, etb, or chase")
+    if purchase_price_gbp <= 0 or quantity < 1:
+        raise HTTPException(status_code=400, detail="Invalid price or quantity")
+
+    user_id = int(user["sub"])
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO portfolio_items
+                (user_id, product_type, product_id, product_name,
+                 purchase_price_gbp, quantity, purchase_date, notes)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+        """, (user_id, product_type, product_id, product_name,
+              purchase_price_gbp, quantity, purchase_date, notes))
+        new_id = cur.fetchone()["id"]
+        conn.commit()
+        return {"id": new_id, "message": "Item added to portfolio"}
+    finally:
+        conn.close()
+
+
+@app.put("/api/portfolio/{item_id}")
+def update_portfolio_item(
+    item_id: int,
+    purchase_price_gbp: float = Body(None),
+    quantity: int = Body(None),
+    purchase_date: str = Body(None),
+    notes: str = Body(None),
+    user=Depends(get_current_user),
+):
+    """Edit a portfolio holding. Must own the item."""
+    user_id = int(user["sub"])
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id FROM portfolio_items
+            WHERE id = %s AND user_id = %s AND deleted_at IS NULL
+        """, (item_id, user_id))
+        if not cur.fetchone():
+            raise HTTPException(status_code=404, detail="Item not found")
+
+        fields = []
+        values = []
+        if purchase_price_gbp is not None:
+            fields.append("purchase_price_gbp = %s")
+            values.append(purchase_price_gbp)
+        if quantity is not None:
+            fields.append("quantity = %s")
+            values.append(quantity)
+        if purchase_date is not None:
+            fields.append("purchase_date = %s")
+            values.append(purchase_date)
+        if notes is not None:
+            fields.append("notes = %s")
+            values.append(notes)
+
+        if not fields:
+            raise HTTPException(status_code=400, detail="No fields to update")
+
+        values.append(item_id)
+        cur.execute(
+            "UPDATE portfolio_items SET " + ", ".join(fields) + " WHERE id = %s",
+            values
+        )
+        conn.commit()
+        return {"message": "Item updated"}
+    finally:
+        conn.close()
+
+
+@app.delete("/api/portfolio/{item_id}")
+def delete_portfolio_item(item_id: int, user=Depends(get_current_user)):
+    """Soft-delete a portfolio holding. Must own the item."""
+    user_id = int(user["sub"])
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id FROM portfolio_items
+            WHERE id = %s AND user_id = %s AND deleted_at IS NULL
+        """, (item_id, user_id))
+        if not cur.fetchone():
+            raise HTTPException(status_code=404, detail="Item not found")
+        cur.execute(
+            "UPDATE portfolio_items SET deleted_at = NOW() WHERE id = %s",
+            (item_id,)
+        )
+        conn.commit()
+        return {"message": "Item removed from portfolio"}
+    finally:
+        conn.close()
+
+
+@app.get("/api/portfolio/digest-summary")
+def portfolio_digest_summary(request: Request):
+    """
+    Aggregate portfolio summary across all premium users — for digest email.
+    Returns total value, total gain, best/worst performer.
+    Requires X-API-Key.
+    """
+    api_key = request.headers.get("X-API-Key")
+    if api_key != API_KEY:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    import psycopg2 as _p2, os as _os
+    from psycopg2.extras import RealDictCursor as _RDC
+
+    conn = _p2.connect(_os.environ.get("DATABASE_URL", ""), cursor_factory=_RDC)
+    try:
+        cur = conn.cursor()
+        # Fetch FX rate
+        fx_rate = 0.79
+        try:
+            import urllib.request as _req, json as _json
+            with _req.urlopen("https://open.er-api.com/v6/latest/USD", timeout=4) as r:
+                fx_rate = float(_json.loads(r.read())["rates"]["GBP"])
+        except Exception:
+            pass
+
+        cur.execute("""
+            SELECT pi.id, pi.product_type, pi.product_id, pi.product_name,
+                   pi.purchase_price_gbp, pi.quantity
+            FROM portfolio_items pi
+            JOIN users u ON u.id = pi.user_id
+            WHERE pi.deleted_at IS NULL
+              AND u.role IN ('premium', 'admin')
+        """)
+        items = cur.fetchall()
+        if not items:
+            return {"total_invested_gbp": 0, "total_current_gbp": 0,
+                    "total_gain_gbp": 0, "total_gain_pct": 0,
+                    "best_performer": None, "worst_performer": None}
+
+        performers = []
+        total_invested = 0.0
+        total_current = 0.0
+
+        for row in items:
+            pid = row["product_id"]
+            ptype = row["product_type"]
+            qty = row["quantity"]
+            purchase_price = float(row["purchase_price_gbp"])
+            current_price = None
+
+            if ptype == "set":
+                cur.execute("SELECT tcgcsv_bb_product_id FROM sets WHERE id = %s", (pid,))
+                sr = cur.fetchone()
+                if sr and sr["tcgcsv_bb_product_id"]:
+                    cur.execute("""
+                        SELECT market_price_usd FROM tcgcsv_prices
+                        WHERE product_id = %s AND sub_type_name = 'Normal'
+                          AND market_price_usd IS NOT NULL
+                        ORDER BY snapshot_date DESC LIMIT 1
+                    """, (sr["tcgcsv_bb_product_id"],))
+                    pr = cur.fetchone()
+                    if pr:
+                        current_price = round(float(pr["market_price_usd"]) * fx_rate, 2)
+            else:
+                cur.execute("""
+                    SELECT ebay_avg_sold_gbp FROM etb_price_snapshots
+                    WHERE etb_id = %s AND ebay_avg_sold_gbp IS NOT NULL
+                    ORDER BY snapshot_date DESC LIMIT 1
+                """, (pid,))
+                pr = cur.fetchone()
+                if pr:
+                    current_price = round(float(pr["ebay_avg_sold_gbp"]), 2)
+
+            cost_basis = purchase_price * qty
+            total_invested += cost_basis
+            if current_price is not None:
+                current_value = current_price * qty
+                total_current += current_value
+                gain_gbp = round(current_value - cost_basis, 2)
+                gain_pct = round((gain_gbp / cost_basis) * 100, 2) if cost_basis > 0 else 0.0
+                performers.append({
+                    "product_name": row["product_name"],
+                    "gain_gbp": gain_gbp,
+                    "gain_pct": gain_pct,
+                })
+
+        total_gain = round(total_current - total_invested, 2)
+        total_gain_pct = round((total_gain / total_invested) * 100, 2) if total_invested > 0 else 0.0
+
+        best = max(performers, key=lambda x: x["gain_pct"]) if performers else None
+        worst = min(performers, key=lambda x: x["gain_pct"]) if performers else None
+
+        return {
+            "total_invested_gbp": round(total_invested, 2),
+            "total_current_gbp": round(total_current, 2),
+            "total_gain_gbp": total_gain,
+            "total_gain_pct": total_gain_pct,
+            "best_performer": best,
+            "worst_performer": worst,
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/api/portfolio/search")
+def portfolio_search(q: str = "", user=Depends(get_current_user)):
+    """
+    Search sets, ETBs, and chase cards by name for the portfolio add form.
+    Returns up to 8 results across all three product types.
+    """
+    if len(q.strip()) < 2:
+        return {"results": []}
+
+    import psycopg2 as _p2, os as _os
+    from psycopg2.extras import RealDictCursor as _RDC
+
+    conn = _p2.connect(_os.environ.get("DATABASE_URL", ""), cursor_factory=_RDC)
+    try:
+        cur = conn.cursor()
+        term = "%" + q.strip().lower() + "%"
+
+        # Booster boxes — sets with price data
+        cur.execute("""
+            SELECT s.id, s.name, s.logo_url,
+                   ms.bb_price_gbp AS current_price_gbp
+            FROM sets s
+            JOIN monthly_snapshots ms ON ms.set_id = s.id
+              AND ms.run_date = (SELECT MAX(run_date) FROM monthly_snapshots)
+            WHERE LOWER(s.name) LIKE %s
+            ORDER BY s.name
+            LIMIT 4
+        """, (term,))
+        sets_rows = cur.fetchall()
+
+        # ETBs
+        cur.execute("""
+            SELECT e.id, e.name, e.logo_url,
+                   eps.ebay_avg_sold_gbp AS current_price_gbp
+            FROM etbs e
+            LEFT JOIN LATERAL (
+                SELECT ebay_avg_sold_gbp FROM etb_price_snapshots
+                WHERE etb_id = e.id ORDER BY snapshot_date DESC LIMIT 1
+            ) eps ON true
+            WHERE LOWER(e.name) LIKE %s
+            ORDER BY e.name
+            LIMIT 4
+        """, (term,))
+        etb_rows = cur.fetchall()
+
+        # Chase cards
+        cur.execute("""
+            SELECT cc.id, cc.card_name AS name, s.name AS set_name,
+                   s.logo_url,
+                   l.raw_gbp AS current_price_gbp
+            FROM chase_cards cc
+            JOIN sets s ON s.id = cc.set_id
+            LEFT JOIN LATERAL (
+                SELECT raw_gbp FROM chase_card_prices
+                WHERE chase_card_id = cc.id AND raw_gbp IS NOT NULL
+                ORDER BY snapshot_date DESC LIMIT 1
+            ) l ON true
+            WHERE cc.active = TRUE
+              AND (LOWER(cc.card_name) LIKE %s OR LOWER(s.name) LIKE %s)
+            ORDER BY cc.card_name
+            LIMIT 4
+        """, (term, term))
+        chase_rows = cur.fetchall()
+
+        results = []
+        for r in sets_rows:
+            results.append({
+                "product_type": "set",
+                "product_id": r["id"],
+                "product_name": r["name"] + " Booster Box",
+                "display_name": r["name"] + " Booster Box",
+                "logo_url": r["logo_url"],
+                "current_price_gbp": float(r["current_price_gbp"]) if r["current_price_gbp"] else None,
+            })
+        for r in etb_rows:
+            results.append({
+                "product_type": "etb",
+                "product_id": r["id"],
+                "product_name": r["name"],
+                "display_name": r["name"],
+                "logo_url": r["logo_url"],
+                "current_price_gbp": float(r["current_price_gbp"]) if r["current_price_gbp"] else None,
+            })
+        for r in chase_rows:
+            results.append({
+                "product_type": "chase",
+                "product_id": r["id"],
+                "product_name": r["name"] + " (" + r["set_name"] + ")",
+                "display_name": r["name"],
+                "set_name": r["set_name"],
+                "logo_url": r["logo_url"],
+                "current_price_gbp": float(r["current_price_gbp"]) if r["current_price_gbp"] else None,
+            })
+
+        return {"results": results[:10]}
+    finally:
+        conn.close()

@@ -1,9 +1,10 @@
-import { getSets, getSummary, getMovers, getRunDates } from "@/lib/api"
+import { getSets, getSummary, getMovers, getRunDates, getHeatScores } from "@/lib/api"
 import { TrackerTable } from "@/components/tracker/TrackerTable"
 import { SummaryCards } from "@/components/tracker/SummaryCards"
 import { MoversPanel } from "@/components/tracker/MoversPanel"
 import Link from "next/link"
 import { Disclaimer } from "@/components/Disclaimer"
+import { DatePickerDropdown } from "@/components/tracker/DatePickerDropdown"
 import { getUser } from "@/lib/auth"
 import type { Metadata } from "next"
 
@@ -69,6 +70,8 @@ export default async function TrackerPage({
   const movers    = moversData.status === "fulfilled"  ? moversData.value          : null
   const runDates  = datesData.status === "fulfilled"   ? datesData.value.run_dates : []
   const user      = userData.status === "fulfilled" && userData.value.authenticated ? userData.value : null
+  const isPremiumUser = user?.role === "premium" || user?.role === "admin"
+  const heatScores = isPremiumUser ? await getHeatScores().catch(() => ({})) : {}
 
   const trackerJsonLd = {
     "@context": "https://schema.org",
@@ -165,42 +168,12 @@ export default async function TrackerPage({
               </p>
             </div>
 
-            {runDates.length > 1 && (
-              <div className="flex gap-2">
-                {runDates.map((d: string, i: number) => {
-                  const isLatest = i === 0
-                  const isSelected = (selectedMonth === d) || (!selectedMonth && isLatest)
-                  const isLocked = !isLatest && !user
-
-                  if (isLocked) {
-                    return (
-                      <Link
-                        key={d}
-                        href="/auth/google"
-                        className="px-3 py-1.5 rounded-lg text-sm transition-colors bg-slate-900 text-slate-600 border border-slate-800 flex items-center gap-1"
-                        title="Sign in to view historical months"
-                      >
-                        🔒 {fmtDate(d)}
-                      </Link>
-                    )
-                  }
-
-                  return (
-                    <Link
-                      key={d}
-                      href={`/tools/tracker?month=${d}`}
-                      className={`px-3 py-1.5 rounded-lg text-sm transition-colors ${
-                        isSelected
-                          ? "bg-slate-600 text-white"
-                          : "bg-slate-900 text-slate-400 hover:text-slate-200 border border-slate-800"
-                      }`}
-                    >
-                      {fmtDate(d)}
-                    </Link>
-                  )
-                })}
-              </div>
-            )}
+            <DatePickerDropdown
+              runDates={runDates}
+              selectedMonth={selectedMonth}
+              isPremium={isPremiumUser}
+              isLoggedIn={!!user}
+            />
           </div>
 
           {!user && (
@@ -255,7 +228,7 @@ export default async function TrackerPage({
 
           <div className="mt-8">
             {sets.length > 0 ? (
-              <TrackerTable sets={sets} user={user} />
+              <TrackerTable sets={sets} user={user} heatScores={heatScores} />
             ) : (
               <div className="bg-slate-900 rounded-xl border border-slate-800 p-12 text-center">
                 <p className="text-slate-400">No data yet — the tracker runs on the 1st of each month.</p>

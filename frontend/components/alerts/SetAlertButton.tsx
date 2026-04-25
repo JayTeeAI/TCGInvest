@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react'
 
 interface SetAlertButtonProps {
-  productType: 'set' | 'etb'
+  productType: 'set' | 'etb' | 'chase_card'
   productId: number
   productName: string
   currentPrice: number

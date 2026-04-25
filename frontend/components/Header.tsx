@@ -9,6 +9,7 @@ export default function Header() {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
   const [dropdownOpen, setDropdownOpen] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -18,7 +19,7 @@ export default function Header() {
     });
   }, []);
 
-  // Close dropdown on outside click
+  // Close desktop dropdown on outside click
   useEffect(() => {
     function handleClick(e: MouseEvent) {
       if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
@@ -29,100 +30,239 @@ export default function Header() {
     return () => document.removeEventListener("mousedown", handleClick);
   }, []);
 
+  // Lock body scroll when mobile menu is open
+  useEffect(() => {
+    if (mobileMenuOpen) {
+      document.body.style.overflow = "hidden";
+    } else {
+      document.body.style.overflow = "";
+    }
+    return () => { document.body.style.overflow = ""; };
+  }, [mobileMenuOpen]);
+
   const handleLogout = async () => {
     await logout();
     setUser(null);
     setDropdownOpen(false);
   };
 
-  return (
-    <header className="w-full border-b border-slate-700 bg-slate-900 px-6 py-3">
-      <div className="max-w-6xl mx-auto flex items-center justify-between">
-        <div className="flex items-center gap-8">
-          <Link href="/" className="text-white font-bold text-lg">
-            TCG Invest
-          </Link>
-          <nav className="hidden sm:flex items-center gap-6">
-            <Link href="/tools/tracker" className="text-slate-400 hover:text-white text-sm transition-colors">
-              Tracker
-            </Link>
-            <Link href="/tools/etb-tracker" className="text-slate-400 hover:text-white text-sm transition-colors">
-              ETB Tracker
-            </Link>
-            <Link href="/blog" className="text-slate-400 hover:text-white text-sm transition-colors">
-              Blog
-            </Link>
-          </nav>
-        </div>
-        <div className="flex items-center gap-3">
-          {loading ? null : user ? (
-            <div className="relative" ref={dropdownRef}>
-              <button
-                onClick={() => setDropdownOpen(prev => !prev)}
-                className="flex items-center gap-2 text-slate-300 hover:text-white transition-colors text-sm"
-              >
-                <span>{user.email}</span>
-                {user.role === "premium" || user.role === "admin" ? (
-                  <span title="Premium" className="text-yellow-400 text-base">&#x1F451;</span>
-                ) : (
-                  <span title="Free account" className="text-slate-500 text-base">&#x1F451;</span>
-                )}
-                <svg className={`w-3 h-3 text-slate-500 transition-transform ${dropdownOpen ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                </svg>
-              </button>
+  const closeMobileMenu = () => setMobileMenuOpen(false);
 
-              {dropdownOpen && (
-                <div className="absolute right-0 mt-2 w-52 bg-slate-800 border border-slate-700 rounded-xl shadow-xl z-50 py-1">
-                  {user.role === "premium" && (
-                    <div className="px-4 py-2 border-b border-slate-700">
-                      <span className="text-xs bg-yellow-500 text-black px-2 py-0.5 rounded-full font-medium">Premium</span>
+  return (
+    <>
+      <header className="w-full border-b border-slate-700 bg-slate-900 px-6 py-3">
+        <div className="max-w-6xl mx-auto flex items-center justify-between">
+          <div className="flex items-center gap-8">
+            <Link href="/" className="text-white font-bold text-lg">
+              TCG Invest
+            </Link>
+            {/* Desktop nav — unchanged */}
+            <nav className="hidden md:flex items-center gap-6">
+              <Link href="/tools/tracker" className="text-slate-400 hover:text-white text-sm transition-colors">
+                BB Tracker
+              </Link>
+              <Link href="/tools/etb-tracker" className="text-slate-400 hover:text-white text-sm transition-colors">
+                ETB Tracker
+              </Link>
+              <Link href="/tools/chase-cards" className="text-slate-400 hover:text-white text-sm transition-colors">
+                Chase Cards
+              </Link>
+              <Link href="/blog" className="text-slate-400 hover:text-white text-sm transition-colors">
+                Blog
+              </Link>
+            </nav>
+          </div>
+
+          <div className="flex items-center gap-3">
+            {/* Desktop auth — unchanged */}
+            <div className="hidden md:flex items-center gap-3">
+              {loading ? null : user ? (
+                <div className="relative" ref={dropdownRef}>
+                  <button
+                    onClick={() => setDropdownOpen(prev => !prev)}
+                    className="flex items-center gap-2 text-slate-300 hover:text-white transition-colors text-sm"
+                  >
+                    <span>{user.email}</span>
+                    {user.role === "premium" || user.role === "admin" ? (
+                      <span title="Premium" className="text-yellow-400 text-base">&#x1F451;</span>
+                    ) : (
+                      <span title="Free account" className="text-slate-500 text-base">&#x1F451;</span>
+                    )}
+                    <svg className={`w-3 h-3 text-slate-500 transition-transform ${dropdownOpen ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                    </svg>
+                  </button>
+
+                  {dropdownOpen && (
+                    <div className="absolute right-0 mt-2 w-52 bg-slate-800 border border-slate-700 rounded-xl shadow-xl z-50 py-1">
+                      {user.role === "premium" && (
+                        <div className="px-4 py-2 border-b border-slate-700">
+                          <span className="text-xs bg-yellow-500 text-black px-2 py-0.5 rounded-full font-medium">Premium</span>
+                        </div>
+                      )}
+                      <Link href="/tools/price-alerts" onClick={() => setDropdownOpen(false)} className="flex items-center gap-2 px-4 py-2.5 text-sm text-slate-300 hover:text-white hover:bg-slate-700 transition-colors">
+                        <span>🔔</span> Price Alerts
+                      </Link>
+                      <Link href="/account/portfolio" onClick={() => setDropdownOpen(false)} className="flex items-center gap-2 px-4 py-2.5 text-sm text-slate-300 hover:text-white hover:bg-slate-700 transition-colors">
+                        <span>💼</span> My Portfolio
+                      </Link>
+                      <Link href="/account/preferences" onClick={() => setDropdownOpen(false)} className="flex items-center gap-2 px-4 py-2.5 text-sm text-slate-300 hover:text-white hover:bg-slate-700 transition-colors">
+                        <span>⚙️</span> Email Preferences
+                      </Link>
+                      {user.role !== "premium" && (
+                        <Link href="/premium" onClick={() => setDropdownOpen(false)} className="flex items-center gap-2 px-4 py-2.5 text-sm text-yellow-400 hover:text-yellow-300 hover:bg-slate-700 transition-colors">
+                          <span>⭐</span> Upgrade to Premium
+                        </Link>
+                      )}
+                      <div className="border-t border-slate-700 mt-1">
+                        <button onClick={handleLogout} className="w-full text-left flex items-center gap-2 px-4 py-2.5 text-sm text-slate-400 hover:text-white hover:bg-slate-700 transition-colors">
+                          <span>→</span> Sign out
+                        </button>
+                      </div>
                     </div>
                   )}
-                  <Link
-                    href="/account/alerts"
-                    onClick={() => setDropdownOpen(false)}
-                    className="flex items-center gap-2 px-4 py-2.5 text-sm text-slate-300 hover:text-white hover:bg-slate-700 transition-colors"
-                  >
+                </div>
+              ) : (
+                <a href={getGoogleLoginUrl()} className="flex items-center gap-2 bg-white text-slate-900 text-sm font-medium px-4 py-2 rounded-lg hover:bg-slate-100 transition-colors">
+                  Sign in with Google
+                </a>
+              )}
+            </div>
+
+            {/* Mobile hamburger button */}
+            <button
+              className="md:hidden flex items-center justify-center w-9 h-9 text-slate-300 hover:text-white transition-colors"
+              onClick={() => setMobileMenuOpen(prev => !prev)}
+              aria-label="Open navigation menu"
+            >
+              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+              </svg>
+            </button>
+          </div>
+        </div>
+      </header>
+
+      {/* Mobile menu overlay */}
+      {mobileMenuOpen && (
+        <div className="fixed inset-0 bg-black/70 z-50 md:hidden" onClick={closeMobileMenu}>
+          {/* Menu panel — stop propagation so clicks inside don't close */}
+          <div
+            className="absolute top-0 left-0 right-0 bg-slate-900 border-b border-slate-700 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Panel header */}
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800">
+              <Link href="/" onClick={closeMobileMenu} className="text-white font-bold text-lg">
+                TCGInvest
+              </Link>
+              <button
+                onClick={closeMobileMenu}
+                className="flex items-center justify-center w-9 h-9 text-slate-400 hover:text-white transition-colors"
+                aria-label="Close navigation menu"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            {/* Live Tools section */}
+            <div className="px-6 py-4 border-b border-slate-800">
+              <p className="text-xs font-semibold text-slate-500 uppercase tracking-widest mb-3">Live Tools</p>
+              <div className="flex flex-col gap-1">
+                <Link href="/tools/tracker" onClick={closeMobileMenu} className="flex items-center justify-between px-3 py-3 rounded-lg text-slate-200 hover:bg-slate-800 transition-colors">
+                  <span className="flex items-center gap-3 text-sm font-medium">
+                    <span className="text-base">📦</span> BB Tracker
+                  </span>
+                  <span className="text-[10px] font-bold bg-green-500/20 text-green-400 border border-green-500/30 px-2 py-0.5 rounded-full">LIVE</span>
+                </Link>
+                <Link href="/tools/etb-tracker" onClick={closeMobileMenu} className="flex items-center justify-between px-3 py-3 rounded-lg text-slate-200 hover:bg-slate-800 transition-colors">
+                  <span className="flex items-center gap-3 text-sm font-medium">
+                    <span className="text-base">🎁</span> ETB Tracker
+                  </span>
+                  <span className="text-[10px] font-bold bg-green-500/20 text-green-400 border border-green-500/30 px-2 py-0.5 rounded-full">LIVE</span>
+                </Link>
+                <Link href="/tools/chase-cards" onClick={closeMobileMenu} className="flex items-center justify-between px-3 py-3 rounded-lg text-slate-200 hover:bg-slate-800 transition-colors">
+                  <span className="flex items-center gap-3 text-sm font-medium">
+                    <span className="text-base">✨</span> Chase Cards
+                  </span>
+                  <span className="text-[10px] font-bold bg-green-500/20 text-green-400 border border-green-500/30 px-2 py-0.5 rounded-full">LIVE</span>
+                </Link>
+                <Link href="/tools/price-alerts" onClick={closeMobileMenu} className="flex items-center justify-between px-3 py-3 rounded-lg text-slate-200 hover:bg-slate-800 transition-colors">
+                  <span className="flex items-center gap-3 text-sm font-medium">
+                    <span className="text-base">🔔</span> Price Alerts
+                  </span>
+                  <span className="text-[10px] font-bold bg-green-500/20 text-green-400 border border-green-500/30 px-2 py-0.5 rounded-full">LIVE</span>
+                </Link>
+              </div>
+            </div>
+
+            {/* Explore section */}
+            <div className="px-6 py-4 border-b border-slate-800">
+              <p className="text-xs font-semibold text-slate-500 uppercase tracking-widest mb-3">Explore</p>
+              <div className="flex flex-col gap-1">
+                <Link href="/blog" onClick={closeMobileMenu} className="flex items-center gap-3 px-3 py-3 rounded-lg text-slate-200 hover:bg-slate-800 transition-colors text-sm font-medium">
+                  <span className="text-base">📝</span> Blog
+                </Link>
+              </div>
+            </div>
+
+            {/* Auth section */}
+            <div className="px-6 py-4">
+              {loading ? null : user ? (
+                <div className="flex flex-col gap-1">
+                  <p className="text-xs font-semibold text-slate-500 uppercase tracking-widest mb-3">Account</p>
+                  {user.role === "premium" && (
+                    <div className="flex items-center gap-2 px-3 py-2 mb-1">
+                      <span className="text-xs bg-yellow-500 text-black px-2 py-0.5 rounded-full font-medium">Premium</span>
+                      <span className="text-slate-400 text-xs">{user.email}</span>
+                    </div>
+                  )}
+                  {user.role !== "premium" && (
+                    <div className="px-3 py-2 mb-1">
+                      <span className="text-slate-400 text-xs">{user.email}</span>
+                    </div>
+                  )}
+                  <Link href="/tools/price-alerts" onClick={closeMobileMenu} className="flex items-center gap-3 px-3 py-3 rounded-lg text-slate-200 hover:bg-slate-800 transition-colors text-sm">
                     <span>🔔</span> Price Alerts
                   </Link>
-                  <Link
-                    href="/account/preferences"
-                    onClick={() => setDropdownOpen(false)}
-                    className="flex items-center gap-2 px-4 py-2.5 text-sm text-slate-300 hover:text-white hover:bg-slate-700 transition-colors"
-                  >
+                  <Link href="/account/portfolio" onClick={closeMobileMenu} className="flex items-center gap-3 px-3 py-3 rounded-lg text-slate-200 hover:bg-slate-800 transition-colors text-sm">
+                    <span>💼</span> My Portfolio
+                  </Link>
+                  <Link href="/account/preferences" onClick={closeMobileMenu} className="flex items-center gap-3 px-3 py-3 rounded-lg text-slate-200 hover:bg-slate-800 transition-colors text-sm">
                     <span>⚙️</span> Email Preferences
                   </Link>
                   {user.role !== "premium" && (
-                    <Link
-                      href="/premium"
-                      onClick={() => setDropdownOpen(false)}
-                      className="flex items-center gap-2 px-4 py-2.5 text-sm text-yellow-400 hover:text-yellow-300 hover:bg-slate-700 transition-colors"
-                    >
+                    <Link href="/premium" onClick={closeMobileMenu} className="flex items-center gap-3 px-3 py-3 rounded-lg text-yellow-400 hover:bg-slate-800 transition-colors text-sm font-medium">
                       <span>⭐</span> Upgrade to Premium
                     </Link>
                   )}
-                  <div className="border-t border-slate-700 mt-1">
-                    <button
-                      onClick={handleLogout}
-                      className="w-full text-left flex items-center gap-2 px-4 py-2.5 text-sm text-slate-400 hover:text-white hover:bg-slate-700 transition-colors"
-                    >
-                      <span>→</span> Sign out
-                    </button>
-                  </div>
+                  {user.role === "premium" && (
+                    <Link href="/account" onClick={closeMobileMenu} className="flex items-center gap-3 px-3 py-3 rounded-lg text-slate-200 hover:bg-slate-800 transition-colors text-sm">
+                      <span>👤</span> My Account
+                    </Link>
+                  )}
+                  <button
+                    onClick={() => { handleLogout(); closeMobileMenu(); }}
+                    className="flex items-center gap-3 px-3 py-3 rounded-lg text-slate-400 hover:bg-slate-800 hover:text-white transition-colors text-sm text-left mt-1"
+                  >
+                    <span>→</span> Sign out
+                  </button>
                 </div>
+              ) : (
+                <a
+                  href={getGoogleLoginUrl()}
+                  onClick={closeMobileMenu}
+                  className="flex items-center justify-center gap-2 bg-white text-slate-900 text-sm font-medium px-4 py-3 rounded-xl hover:bg-slate-100 transition-colors w-full"
+                >
+                  Sign in with Google
+                </a>
               )}
             </div>
-          ) : (
-            <a
-              href={getGoogleLoginUrl()}
-              className="flex items-center gap-2 bg-white text-slate-900 text-sm font-medium px-4 py-2 rounded-lg hover:bg-slate-100 transition-colors"
-            >
-              Sign in with Google
-            </a>
-          )}
+          </div>
         </div>
-      </div>
-    </header>
+      )}
+    </>
   );
 }

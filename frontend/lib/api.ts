@@ -47,6 +47,18 @@ export async function getSetHistory(setName: string) {
   return apiFetch(`/api/sets/${encodeURIComponent(setName)}/history`)
 }
 
+export async function getSetCardPriceHistory(setName: string) {
+  return apiFetch(`/api/sets/${encodeURIComponent(setName)}/card-price-history`)
+}
+
+export async function getSetCardPriceHistoryDaily(setName: string) {
+  return apiFetch(`/api/sets/${encodeURIComponent(setName)}/card-price-history-daily`)
+}
+
+export async function getSetBBPriceHistoryDaily(setId: number) {
+  return apiFetch(`/api/sets/${setId}/bb-price-history-daily`)
+}
+
 export async function getTools() {
   return apiFetch("/api/tools")
 }
@@ -63,14 +75,47 @@ export async function getCurrentPrice(setName: string) {
   return apiFetch(`/api/roi-calculator/current-price?set_name=${encodeURIComponent(setName)}`)
 }
 
-export async function getETBs() {
-  return apiFetch("/api/etbs")
+export async function getETBs(snapshotDate?: string) {
+  const qs = snapshotDate ? `?snapshot_date=${encodeURIComponent(snapshotDate)}` : ""
+  return apiFetch(`/api/etbs${qs}`)
 }
 
 export async function getETBHistory(etbId: number) {
   return apiFetch(`/api/etbs/${etbId}/history`)
 }
 
+export async function getETBSnapshotDates() {
+  return apiFetch("/api/etb/snapshot-dates")
+}
+
 export async function getETBMovers() {
   return apiFetch("/api/etb-movers")
+}
+
+export async function getChaseMovers() {
+  return apiFetch("/api/chase-movers")
+}
+
+export async function getChaseCards() {
+  return apiFetch("/api/chase-cards")
+}
+
+export async function getChaseCard(id: number | string) {
+  return apiFetch(`/api/chase-cards/${id}`)
+}
+
+export async function getChaseCardHistory(id: number | string) {
+  return apiFetch(`/api/chase-cards/${id}/history`)
+}
+
+export async function getSetMomentum(setId: number) {
+  return apiFetch(`/api/sets/${setId}/momentum`)
+}
+
+export async function getSetHeat(setId: number) {
+  return apiFetch(`/api/sets/${setId}/heat`)
+}
+
+export async function getHeatScores() {
+  return apiFetch("/api/heat-scores")
 }

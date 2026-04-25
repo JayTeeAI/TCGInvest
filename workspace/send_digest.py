@@ -7,7 +7,7 @@ Cron schedule:
   Weekly:  runs daily but only sends to digest_frequency='daily' each day,
            'weekly' on Sundays, 'monthly' on 1st of month.
 """
-import os, sys, httpx, datetime, logging
+import os, sys, httpx, datetime, logging, json, urllib.parse
 
 LOG_FILE = "/root/.openclaw/logs/digest.log"
 os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
@@ -44,6 +44,24 @@ def run():
     today = datetime.date.today()
     log.info(f"Digest run started — {today} (weekday={today.weekday()})")
 
+    # Fetch aggregate portfolio summary to append to digests (non-fatal)
+    portfolio_qs = ""
+    try:
+        port_resp = httpx.get(
+            f"{API_BASE}/api/portfolio/digest-summary",
+            headers={"X-API-Key": API_KEY},
+            timeout=10
+        )
+        if port_resp.status_code == 200:
+            portfolio_qs = "&portfolio_json=" + urllib.parse.quote_plus(
+                json.dumps(port_resp.json())
+            )
+            log.info("Portfolio digest-summary fetched OK")
+        else:
+            log.info(f"Portfolio digest-summary returned {port_resp.status_code} — skipping")
+    except Exception as e:
+        log.warning(f"Portfolio summary fetch failed (non-fatal): {e}")
+
     for freq in ("daily", "weekly", "monthly"):
         if not should_send(freq, today):
             log.info(f"Skipping {freq} — not due today")
@@ -51,7 +69,7 @@ def run():
         log.info(f"Sending {freq} digests...")
         try:
             resp = httpx.post(
-                f"{API_BASE}/api/digest/run?frequency={freq}",
+                f"{API_BASE}/api/digest/run?frequency={freq}{portfolio_qs}",
                 headers={"X-API-Key": API_KEY},
                 timeout=120
             )

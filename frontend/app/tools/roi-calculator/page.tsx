@@ -2,154 +2,162 @@
 
 import { useState, useEffect } from 'react'
 import Link from 'next/link'
-import { getCurrentPrice, getSets, getMovers } from '@/lib/api'
-import { formatGBP, formatPct } from '@/lib/format'
+import {
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  Legend,
+  ResponsiveContainer,
+} from 'recharts'
 import { Disclaimer } from '@/components/Disclaimer'
 
-interface PriceData {
-  set_name: string
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || ''
+
+interface RoiSet {
+  id: number
+  name: string
   era: string
-  current_price: number
-  run_date: string
+  logo_url: string | null
 }
 
-interface MoversData {
-  latest: string
-  previous: string
-  movers: Array<{
-    name: string
-    era: string
-    curr_bb: number
-    bb_change_pct: number | null
-  }>
+interface SeriesPoint {
+  date: string
+  portfolio_gbp: number
+  sp500_gbp: number
 }
 
-export default function RoiCalculatorPage({
-  searchParams,
-}: {
-  searchParams: Promise<{ setName?: string; currentPrice?: string }>
-}) {
-  const [params, setParams] = useState<{ setName?: string; currentPrice?: string }>({})
-  const [setName, setSetName] = useState('')
+interface RoiResult {
+  set_name: string
+  set_id: number
+  purchase_date: string
+  used_earliest_date: boolean
+  quantity: number
+  purchase_value_gbp: number
+  current_value_gbp: number
+  current_price_gbp: number
+  abs_gain_gbp: number
+  pct_return: number
+  ann_return: number
+  years_held: number
+  sp500_value_gbp: number
+  sp500_gain_gbp: number
+  fx_rate: number
+  series: SeriesPoint[]
+}
+
+function formatGBP(v: number | null) {
+  if (v === null) return '—'
+  return new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP', maximumFractionDigits: 0 }).format(v)
+}
+
+function formatPct(v: number | null) {
+  if (v === null) return '—'
+  return (v >= 0 ? '+' : '') + v.toFixed(1) + '%'
+}
+
+function formatDate(d: string) {
+  return new Date(d).toLocaleDateString('en-GB', { month: 'short', year: 'numeric' })
+}
+
+// Thin down series for chart readability (max ~52 points)
+function thinSeries(series: SeriesPoint[], maxPoints = 52): SeriesPoint[] {
+  if (series.length <= maxPoints) return series
+  const step = Math.ceil(series.length / maxPoints)
+  const thinned = series.filter((_, i) => i % step === 0)
+  // Always include last
+  if (thinned[thinned.length - 1] !== series[series.length - 1]) {
+    thinned.push(series[series.length - 1])
+  }
+  return thinned
+}
+
+interface TooltipPayloadItem {
+  name: string;
+  value: number;
+  color: string;
+}
+
+const CustomTooltip = ({ active, payload, label }: { active?: boolean; payload?: TooltipPayloadItem[]; label?: string }) => {
+  if (!active || !payload || !payload.length) return null
+  return (
+    <div className="bg-slate-800 border border-slate-700 rounded-lg p-3 shadow-xl text-sm">
+      <p className="text-slate-400 mb-2">{label}</p>
+      {payload.map((p) => (
+        <p key={p.name} style={{ color: p.color }} className="font-medium">
+          {p.name}: {formatGBP(p.value)}
+        </p>
+      ))}
+    </div>
+  )
+}
+
+export default function RoiCalculatorPage() {
+  const [sets, setSets] = useState<RoiSet[]>([])
+  const [selectedSetId, setSelectedSetId] = useState<number | ''>('')
   const [purchasePrice, setPurchasePrice] = useState('')
   const [purchaseDate, setPurchaseDate] = useState('')
   const [quantity, setQuantity] = useState('1')
 
-  const [currentPrice, setCurrentPrice] = useState<number | null>(null)
-  const [priceError, setPriceError] = useState('')
-  const [moversData, setMoversData] = useState<MoversData | null>(null)
-  const [availableSets, setAvailableSets] = useState<string[]>([])
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(false)
+  const [setsLoading, setSetsLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [result, setResult] = useState<RoiResult | null>(null)
 
-  // Results
-  const [results, setResults] = useState<{
-    currentValue: number | null
-    profitLossGbp: number | null
-    profitLossPct: number | null
-    annualisedReturn: number | null
-  } | null>(null)
-
-  // Initialize from search params
+  // Load sets with tcgcsv data
   useEffect(() => {
-    searchParams.then((p) => {
-      setParams(p)
-      if (p.setName) setSetName(p.setName)
-      if (p.currentPrice) setCurrentPrice(parseFloat(p.currentPrice))
-    })
-  }, [searchParams])
-
-  // Load available sets and movers on mount
-  useEffect(() => {
-    const loadData = async () => {
-      try {
-        const [setsRes, moversRes] = await Promise.all([
-          getSets(),
-          getMovers(),
-        ])
-        setAvailableSets(setsRes.sets?.map((s: any) => s.name) || [])
-        setMoversData(moversRes as MoversData)
-      } catch (error) {
-        console.error('Error loading data:', error)
-      } finally {
-        setLoading(false)
-      }
-    }
-    loadData()
+    fetch(`${API_BASE}/api/roi/sets`)
+      .then(r => r.json())
+      .then(d => setSets(d.sets || []))
+      .catch(() => setError('Could not load sets'))
+      .finally(() => setSetsLoading(false))
   }, [])
 
-  // Fetch current price when set name changes
-  const handleSetNameChange = async (name: string) => {
-    setSetName(name)
-    setPriceError('')
-    setCurrentPrice(null)
-
-    if (name.trim()) {
-      try {
-        const data = await getCurrentPrice(name) as PriceData
-        setCurrentPrice(data.current_price)
-      } catch (error) {
-        setPriceError(`Could not find pricing data for "${name}"`)
-        setCurrentPrice(null)
-      }
-    }
-  }
-
-  // Calculate ROI
-  const handleCalculate = (e: React.FormEvent) => {
+  const handleCalculate = async (e: React.FormEvent) => {
     e.preventDefault()
+    setError('')
+    setResult(null)
 
-    // Validation
-    if (!setName.trim()) {
-      alert('Please select a set')
-      return
-    }
-    if (!purchasePrice || parseFloat(purchasePrice) <= 0) {
-      alert('Please enter a valid purchase price')
-      return
-    }
-    if (!purchaseDate) {
-      alert('Please enter a purchase date')
-      return
-    }
-    if (!quantity || parseFloat(quantity) <= 0) {
-      alert('Please enter a valid quantity')
-      return
-    }
-    if (currentPrice === null || currentPrice <= 0) {
-      alert('Could not fetch current price for this set')
-      return
-    }
+    if (!selectedSetId) { setError('Please select a set'); return }
+    if (!purchasePrice || parseFloat(purchasePrice) <= 0) { setError('Please enter a valid purchase price'); return }
+    if (!purchaseDate) { setError('Please enter a purchase date'); return }
+    if (!quantity || parseInt(quantity) < 1) { setError('Please enter a valid quantity'); return }
 
-    const purchasePriceNum = parseFloat(purchasePrice)
-    const quantityNum = parseFloat(quantity)
-
-    // Calculate
-    const totalCurrentValue = currentPrice * quantityNum
-    const profitLoss = totalCurrentValue - purchasePriceNum
-    const profitLossPct = (profitLoss / purchasePriceNum) * 100
-
-    // Annualised return
-    const purchaseDateObj = new Date(purchaseDate)
-    const now = new Date()
-    const yearsHeld = (now.getTime() - purchaseDateObj.getTime()) / (365.25 * 24 * 60 * 60 * 1000)
-    let annualisedReturn: number | null = null
-    if (yearsHeld > 0 && purchasePriceNum > 0) {
-      annualisedReturn = (Math.pow(totalCurrentValue / purchasePriceNum, 1 / yearsHeld) - 1) * 100
+    setLoading(true)
+    try {
+      const res = await fetch(`${API_BASE}/api/roi/calculate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          set_id: selectedSetId,
+          purchase_date: purchaseDate,
+          purchase_price_gbp: parseFloat(purchasePrice),
+          quantity: parseInt(quantity),
+        }),
+      })
+      if (!res.ok) {
+        const err = await res.json()
+        setError(err.detail || 'Calculation failed')
+        return
+      }
+      const data: RoiResult = await res.json()
+      setResult(data)
+    } catch {
+      setError('Network error — please try again')
+    } finally {
+      setLoading(false)
     }
-
-    setResults({
-      currentValue: totalCurrentValue,
-      profitLossGbp: profitLoss,
-      profitLossPct: profitLossPct,
-      annualisedReturn: annualisedReturn,
-    })
   }
 
-  const isCurrentSetInMovers = moversData?.movers.some(m => m.name === setName)
+  const isGain = result ? result.abs_gain_gbp >= 0 : true
+  const beatsSP500 = result ? result.pct_return > (result.sp500_value_gbp / result.purchase_value_gbp - 1) * 100 : false
+  const chartData = result ? thinSeries(result.series) : []
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100">
-      <div className="max-w-5xl mx-auto px-6 py-12">
+      <div className="max-w-5xl mx-auto px-4 sm:px-6 py-10 sm:py-12">
         {/* Nav */}
         <div className="mb-8">
           <Link href="/" className="text-slate-500 hover:text-slate-300 text-sm transition-colors">
@@ -161,47 +169,38 @@ export default function RoiCalculatorPage({
         <div className="mb-8">
           <h1 className="text-3xl font-bold text-white mb-2">ROI Calculator</h1>
           <p className="text-slate-400">
-            Calculate your return on investment for Pokemon TCG sealed products.
+            See how your sealed Pokémon TCG investment has performed — with historical prices and a benchmark comparison.
           </p>
         </div>
 
         <Disclaimer />
 
-        {/* Main content */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 mt-8">
-          {/* Input form */}
-          <div className="lg:col-span-2">
-            <form onSubmit={handleCalculate} className="bg-slate-900 rounded-xl border border-slate-800 p-6">
-              <h2 className="text-xl font-bold mb-6 text-white">Your Investment</h2>
-
-              {/* Set Name */}
-              <div className="mb-6">
+        {/* Form */}
+        <div className="mt-8 bg-slate-900 rounded-xl border border-slate-800 p-6">
+          <h2 className="text-xl font-bold mb-6 text-white">Your Investment</h2>
+          <form onSubmit={handleCalculate}>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+              {/* Set selector */}
+              <div className="sm:col-span-2">
                 <label className="block text-sm font-medium text-slate-300 mb-2">
-                  Pokemon TCG Set
+                  Pokémon TCG Set
                 </label>
-                <input
-                  type="text"
-                  placeholder="Search for a set..."
-                  value={setName}
-                  onChange={(e) => handleSetNameChange(e.target.value)}
-                  list="sets-list"
-                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-slate-600"
-                />
-                <datalist id="sets-list">
-                  {availableSets.map((set) => (
-                    <option key={set} value={set} />
+                <select
+                  value={selectedSetId}
+                  onChange={e => setSelectedSetId(e.target.value ? parseInt(e.target.value) : '')}
+                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-blue-500 appearance-none"
+                  disabled={setsLoading}
+                >
+                  <option value="">{setsLoading ? 'Loading sets…' : '— Select a set —'}</option>
+                  {sets.map(s => (
+                    <option key={s.id} value={s.id}>{s.name} ({s.era})</option>
                   ))}
-                </datalist>
-                {priceError && <p className="text-red-400 text-sm mt-2">{priceError}</p>}
-                {currentPrice && setName && (
-                  <p className="text-green-400 text-sm mt-2">
-                    Current price: {formatGBP(currentPrice)} per box
-                  </p>
-                )}
+                </select>
+                <p className="text-slate-500 text-xs mt-1.5">Only sets with daily price history (TCGCSV) are shown</p>
               </div>
 
-              {/* Purchase Price */}
-              <div className="mb-6">
+              {/* Purchase price */}
+              <div>
                 <label className="block text-sm font-medium text-slate-300 mb-2">
                   Total Purchase Price (£)
                 </label>
@@ -209,27 +208,15 @@ export default function RoiCalculatorPage({
                   type="number"
                   placeholder="e.g. 240.00"
                   step="0.01"
+                  min="0.01"
                   value={purchasePrice}
-                  onChange={(e) => setPurchasePrice(e.target.value)}
-                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-slate-600"
-                />
-              </div>
-
-              {/* Purchase Date */}
-              <div className="mb-6">
-                <label className="block text-sm font-medium text-slate-300 mb-2">
-                  Purchase Date
-                </label>
-                <input
-                  type="date"
-                  value={purchaseDate}
-                  onChange={(e) => setPurchaseDate(e.target.value)}
-                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-slate-600"
+                  onChange={e => setPurchasePrice(e.target.value)}
+                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
                 />
               </div>
 
               {/* Quantity */}
-              <div className="mb-6">
+              <div>
                 <label className="block text-sm font-medium text-slate-300 mb-2">
                   Quantity (boxes)
                 </label>
@@ -239,90 +226,158 @@ export default function RoiCalculatorPage({
                   step="1"
                   min="1"
                   value={quantity}
-                  onChange={(e) => setQuantity(e.target.value)}
-                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-slate-600"
+                  onChange={e => setQuantity(e.target.value)}
+                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
                 />
               </div>
 
-              {/* Submit button */}
-              <button
-                type="submit"
-                className="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-4 rounded-lg transition-colors"
-              >
-                Calculate ROI
-              </button>
-            </form>
-          </div>
-
-          {/* Results */}
-          <div>
-            {results ? (
-              <div className="bg-slate-900 rounded-xl border border-slate-800 p-6">
-                <h2 className="text-xl font-bold mb-6 text-white">Results</h2>
-
-                <ResultCard
-                  label="Current Value"
-                  value={formatGBP(results.currentValue)}
-                  color="text-white"
+              {/* Purchase date */}
+              <div className="sm:col-span-2">
+                <label className="block text-sm font-medium text-slate-300 mb-2">
+                  Purchase Date
+                </label>
+                <input
+                  type="date"
+                  value={purchaseDate}
+                  onChange={e => setPurchaseDate(e.target.value)}
+                  min="2024-02-08"
+                  max={new Date().toISOString().split('T')[0]}
+                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-blue-500"
                 />
-
-                <ResultCard
-                  label="Profit/Loss (£)"
-                  value={formatGBP(results.profitLossGbp)}
-                  color={results.profitLossGbp && results.profitLossGbp >= 0 ? 'text-green-400' : 'text-red-400'}
-                />
-
-                <ResultCard
-                  label="Profit/Loss (%)"
-                  value={results.profitLossPct != null ? `${results.profitLossPct.toFixed(1)}%` : '—'}
-                  color={results.profitLossPct && results.profitLossPct >= 0 ? 'text-green-400' : 'text-red-400'}
-                />
-
-                {results.annualisedReturn != null && (
-                  <ResultCard
-                    label="Annualised Return (%)"
-                    value={`${results.annualisedReturn.toFixed(1)}%`}
-                    color={results.annualisedReturn >= 0 ? 'text-green-400' : 'text-red-400'}
-                  />
-                )}
+                <p className="text-slate-500 text-xs mt-1.5">
+                  Price history available from <span className="text-slate-400">8 Feb 2024</span>. Earlier dates will use the earliest available price.
+                </p>
               </div>
-            ) : (
-              <div className="bg-slate-900 rounded-xl border border-slate-800 p-6 text-center">
-                <p className="text-slate-400">Fill in your investment details and click Calculate ROI to see results.</p>
+            </div>
+
+            {error && (
+              <div className="mt-4 text-red-400 text-sm bg-red-950/40 border border-red-900 rounded-lg px-4 py-3">
+                {error}
               </div>
             )}
-          </div>
+
+            <button
+              type="submit"
+              disabled={loading || setsLoading}
+              className="mt-6 w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold py-3 px-4 rounded-lg transition-colors text-base"
+            >
+              {loading ? 'Calculating…' : 'Calculate ROI'}
+            </button>
+          </form>
         </div>
 
-        {/* Market Movers */}
-        {moversData && moversData.movers.length > 0 && (
-          <div className="mt-12">
-            <h2 className="text-xl font-bold text-white mb-4">Market Movers (Top 3)</h2>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              {moversData.movers.slice(0, 3).map((mover) => (
-                <div
-                  key={mover.name}
-                  className={`rounded-xl border p-4 ${
-                    isCurrentSetInMovers && mover.name === setName
-                      ? 'bg-blue-900 border-blue-700'
-                      : 'bg-slate-900 border-slate-800'
-                  }`}
-                >
-                  <p className="font-medium text-white">{mover.name}</p>
-                  <p className="text-slate-400 text-sm mb-2">{mover.era}</p>
-                  <p className="text-lg font-bold">
-                    {mover.curr_bb ? formatGBP(mover.curr_bb) : '—'}
-                  </p>
-                  {mover.bb_change_pct != null && (
-                    <p className={`text-sm font-medium ${
-                      mover.bb_change_pct >= 0 ? 'text-green-400' : 'text-red-400'
-                    }`}>
-                      {mover.bb_change_pct >= 0 ? '+' : ''}{mover.bb_change_pct.toFixed(1)}% MoM
-                    </p>
-                  )}
-                </div>
-              ))}
+        {/* Results */}
+        {result && (
+          <div className="mt-8 space-y-6">
+            {/* Warning if earliest date was used */}
+            {result.used_earliest_date && (
+              <div className="bg-amber-950/40 border border-amber-800 rounded-lg px-4 py-3 text-amber-300 text-sm">
+                ⚠ Your purchase date was before our earliest data (8 Feb 2024). The calculation uses the earliest available price as a proxy.
+              </div>
+            )}
+
+            {/* Stat cards */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+              <StatCard label="Current Value" value={formatGBP(result.current_value_gbp)} color="text-white" />
+              <StatCard
+                label="Gain / Loss"
+                value={formatGBP(result.abs_gain_gbp)}
+                color={isGain ? 'text-green-400' : 'text-red-400'}
+              />
+              <StatCard
+                label="Total Return"
+                value={formatPct(result.pct_return)}
+                color={isGain ? 'text-green-400' : 'text-red-400'}
+              />
+              <StatCard
+                label="Annualised"
+                value={formatPct(result.ann_return)}
+                color={result.ann_return >= 0 ? 'text-green-400' : 'text-red-400'}
+              />
             </div>
+
+            {/* S&P 500 comparison */}
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
+              <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-4">vs S&amp;P 500 Benchmark (10% p.a.)</h3>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <CompareRow
+                  label="Your portfolio"
+                  value={formatGBP(result.current_value_gbp)}
+                  gain={formatGBP(result.abs_gain_gbp)}
+                  positive={isGain}
+                />
+                <CompareRow
+                  label="S&P 500 equivalent"
+                  value={formatGBP(result.sp500_value_gbp)}
+                  gain={formatGBP(result.sp500_gain_gbp)}
+                  positive={true}
+                />
+                <div className="flex flex-col justify-center">
+                  <p className="text-xs text-slate-400 mb-1">Verdict</p>
+                  <p className={`text-lg font-bold ${beatsSP500 ? 'text-green-400' : 'text-red-400'}`}>
+                    {beatsSP500 ? '✓ Beat the market' : '✗ Underperformed'}
+                  </p>
+                  <p className="text-slate-400 text-xs mt-1">
+                    Held for {result.years_held < 1
+                      ? `${Math.round(result.years_held * 12)} months`
+                      : `${result.years_held.toFixed(1)} years`}
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Chart */}
+            {chartData.length > 1 && (
+              <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
+                <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-6">Portfolio Value Over Time</h3>
+                <ResponsiveContainer width="100%" height={300}>
+                  <LineChart data={chartData} margin={{ top: 5, right: 5, left: 5, bottom: 5 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+                    <XAxis
+                      dataKey="date"
+                      tickFormatter={formatDate}
+                      tick={{ fill: '#64748b', fontSize: 11 }}
+                      axisLine={{ stroke: '#334155' }}
+                      tickLine={false}
+                      interval="preserveStartEnd"
+                    />
+                    <YAxis
+                      tickFormatter={v => '£' + (v >= 1000 ? (v / 1000).toFixed(0) + 'k' : v)}
+                      tick={{ fill: '#64748b', fontSize: 11 }}
+                      axisLine={false}
+                      tickLine={false}
+                      width={52}
+                    />
+                    <Tooltip content={<CustomTooltip />} />
+                    <Legend
+                      formatter={(value) => <span style={{ color: '#94a3b8', fontSize: '12px' }}>{value}</span>}
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey="portfolio_gbp"
+                      name="Your Portfolio"
+                      stroke="#3b82f6"
+                      strokeWidth={2}
+                      dot={false}
+                      activeDot={{ r: 4, fill: '#3b82f6' }}
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey="sp500_gbp"
+                      name="S&P 500 (10% p.a.)"
+                      stroke="#f59e0b"
+                      strokeWidth={1.5}
+                      strokeDasharray="5 4"
+                      dot={false}
+                      activeDot={{ r: 4, fill: '#f59e0b' }}
+                    />
+                  </LineChart>
+                </ResponsiveContainer>
+                <p className="text-slate-600 text-xs mt-3 text-center">
+                  Price data from TCGCSV · USD converted at live rate ({result.fx_rate}) · Past performance is not indicative of future results
+                </p>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -330,19 +385,21 @@ export default function RoiCalculatorPage({
   )
 }
 
-function ResultCard({
-  label,
-  value,
-  color,
-}: {
-  label: string
-  value: string
-  color: string
-}) {
+function StatCard({ label, value, color }: { label: string; value: string; color: string }) {
   return (
-    <div className="mb-4 pb-4 border-b border-slate-800 last:border-b-0">
+    <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
       <p className="text-slate-400 text-xs uppercase tracking-wider mb-1">{label}</p>
-      <p className={`text-2xl font-bold ${color}`}>{value}</p>
+      <p className={`text-xl sm:text-2xl font-bold ${color}`}>{value}</p>
+    </div>
+  )
+}
+
+function CompareRow({ label, value, gain, positive }: { label: string; value: string; gain: string; positive: boolean }) {
+  return (
+    <div>
+      <p className="text-xs text-slate-400 mb-1">{label}</p>
+      <p className="text-lg font-bold text-white">{value}</p>
+      <p className={`text-sm font-medium ${positive ? 'text-green-400' : 'text-red-400'}`}>{gain}</p>
     </div>
   )
 }

@@ -36,7 +36,7 @@ export function MoverPostApr2026Content() {
       <div className="mb-8">
         <h2 className="text-xl font-bold text-white mb-4">Overview</h2>
         <p className="text-slate-300 leading-relaxed mb-4">
-          April 2026 vs March 2026 comparison across 43 tracked booster box sets.
+          April 2026 vs March 2026 comparison across tracked booster box sets.
           Data sourced from eBay UK sold listings via TCGInvest monthly price pipeline.
         </p>
       </div>
@@ -66,7 +66,7 @@ export function MoverPostApr2026Content() {
       <p className="text-slate-500 text-xs mt-6">
         Comparison period: March 2026 vs April 2026.
         Prices from eBay UK sold listings. AI scores via Groq llama-3.3-70b.
-        Next update: following monthly pipeline run.
+        Next update: following weekly pipeline run.
       </p>
     </div>
   )

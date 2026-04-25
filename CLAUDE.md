@@ -297,3 +297,118 @@ sync-brain.sh handles self-healing CLAUDE.md sync to Paperclip.
 
 *Last updated: 2026-04-18 | Version: 2.0*
 *Update this file at the end of every session that produces new knowledge about the project.*
+
+---
+
+## 12. Sprint 4 — Batch 3 Complete (2026-04-21)
+
+### Momentum UI shipped
+- `lib/api.ts` — added `getSetMomentum(setId: number)` fetch function
+- `TrackerTable.tsx` — 7d % / 30d % column added to desktop table and mobile card view
+  - Premium users: live coloured pills (green/red) fetched client-side via `useEffect` across all sets
+  - Free users: blurred placeholder + 🔒 lock icon linking to /premium
+- `/sets/[slug]/page.tsx` — momentum pills rendered server-side below the 4-stat price card grid
+  - BB 7d, BB 30d, ETB 7d, ETB 30d pills with ▲/▼ indicators and colour coding
+  - Uses `set.id` (integer) for the momentum API call — not set name
+  - Null-safe: only renders if at least one value is non-null
+
+### Bug fixes
+- `/api/sets/{set_id}/momentum` route was shadowed by `/api/sets/{set_name}/history` (FastAPI first-match routing)
+  — fixed by moving momentum route to line 155 (between `run-dates` and `{set_name}/history`)
+- `_RDC` (RealDictCursor) was not defined at module scope in main.py
+  — fixed by adding `from psycopg2.extras import RealDictCursor as _RDC` inside the momentum endpoint
+
+### Price history clarification
+- All 46 sets have `monthly_snapshots` data (BB prices) — backfill is complete and working
+- Chase card `chase_card_prices` only has 3 days of data (Apr 19–21): PriceCharting API is live-only,
+  no historical backfill possible — history accumulates weekly going forward
+- Momentum endpoint reads from `tcgcsv_prices` (11.4M rows, Feb 2024–Apr 2026) — data is healthy
+
+---
+
+## 15. Schema Guard & Persistent Environment Memory
+*Added: 2026-04-23 — Initialized by Claude Systems Architect Protocol*
+
+The `.agent/` directory at `/root/.openclaw/.agent/` is the **Persistent Environment Memory** layer.
+It contains the living Source of Truth for the entire system. Every agent and every session MUST
+consult these files before making structural changes.
+
+### Files
+
+| File | Purpose |
+|---|---|
+| `.agent/MANIFEST.json` | Live snapshot: all DB tables + schemas, cron jobs, n8n workflows, route map |
+| `.agent/LOGIC_REGISTRY.md` | Architectural "Whys" — the reasoning behind every structural decision |
+| `.agent/ACTIVE_STATE.md` | Current sprint status and multi-agent handoff doc |
+| `.agent/refresh.sh` | Run to update MANIFEST.json with latest DB sizes and cron state |
+
+---
+
+## 16. Hard Guardrails — Non-Negotiable in Every Session
+
+### GUARDRAIL-1: Mapping First Rule
+**NEVER suggest a new database table without first reading `.agent/MANIFEST.json`.**
+There are 19 tables. Before adding any new table:
+1. Open MANIFEST.json and review all 19 tables
+2. Identify whether the new data can map to an existing table
+3. If yes — map it. If genuinely no fit — document the decision in LOGIC_REGISTRY.md with an ARCH-XXX entry.
+4. Special warning: `tcgcsv_prices` (2.4 GB) is the single source of truth for all raw price history.
+   Do NOT create parallel price tables.
+
+### GUARDRAIL-2: Cron Safety Rule
+**Before editing ANY pipeline script, check MANIFEST.json `cron_jobs` for dependents.**
+Critical dependency chain (Monday pipeline):
+```
+first_run_v3.py (09:00) → score_sets.py (09:30) → generate_blog_posts.py (10:00)
+```
+Daily chain:
+```
+tcgcsv_daily.py (21:00) → score_heat.py (22:00)
+chase/fetch_prices_scrape.py (06:00) [independent]
+check_alerts.py + send_digest.py (09:15) [reads from multiple tables]
+```
+If editing a script that any downstream job reads from, the downstream job must be tested too.
+
+### GUARDRAIL-3: Multi-Agent Handoff Protocol
+**At the end of every Strategic planning phase:**
+1. Update `.agent/ACTIVE_STATE.md` with all decisions made
+2. Summarise the implementation plan clearly in ACTIVE_STATE.md
+3. **Instruct Jaytee to start a NEW chat** for the Implementation phase
+4. The new chat should begin by reading ACTIVE_STATE.md and MANIFEST.json
+This preserves context window efficiency and prevents strategic drift during implementation.
+
+### GUARDRAIL-4: Schema Change Pattern
+When any DDL is required (ALTER TABLE, CREATE TABLE, DROP):
+1. Always `cp` the affected migration script before editing
+2. Test on paperclip (preprod) first
+3. Use the pattern: `PGPASSWORD='...' psql -h 127.0.0.1 -U tcginvest -d tcginvest -c '...'`
+4. Update MANIFEST.json after migration (run `.agent/refresh.sh`)
+
+### GUARDRAIL-5: The .env Contract
+`/root/.openclaw/api/.env` is **read-only**. Never modify it. Never print its contents to a
+terminal that persists in logs. When credentials are needed, grep for the specific key only.
+
+
+---
+
+## Sprint 5 Track B — Session log (2026-04-23)
+
+### Completed tasks
+| Task | Status | Notes |
+|------|--------|-------|
+| B1 | ✅ Done | Date picker button strip replaced with `<select>` dropdown (`DatePickerDropdown.tsx` — new component). Compact, no overflow. |
+| B2 | ✅ Done | ETB `fmtDate()` updated: `"20 Apr '26"` → `"Apr 2026"`. 1-line change in `etb-tracker/page.tsx`. |
+| B3a | ✅ Done | Set name column: `truncate max-w-[180px] title={set.name}` on Link; BB price td: `whitespace-nowrap`. Both desktop + mobile. |
+| B3b | ✅ Done | Star always yellow when `isStarred` (was grayed when bought). Tick always `text-emerald-500/60` when starred-not-bought (was invisible `slate-500`). Both desktop + mobile. |
+| B3c | ✅ Done | Yellow row shading: `bg-yellow-500/5` → `bg-yellow-500/10` desktop; `border-yellow-500/20` → `border-yellow-500/30` mobile. |
+| B4 | ✅ Done | Auth gate wired into `DatePickerDropdown`: unauthed/free = historical options `disabled` + 🔒 prefix + hint link below select; premium = all dates enabled. |
+
+### Files changed
+- `frontend/app/tools/tracker/page.tsx` — import + replaced button strip with `<DatePickerDropdown />`
+- `frontend/app/tools/etb-tracker/page.tsx` — `fmtDate()` 1-line fix
+- `frontend/components/tracker/TrackerTable.tsx` — B3a/b/c polish
+- `frontend/components/tracker/DatePickerDropdown.tsx` — NEW: `'use client'` dropdown component
+
+### Lessons Learned
+- **L6 — Port 3000 root process pattern repeats.** After killing root's next-server and restarting via `nohup sudo -u jaytee npm exec next start -- -p 3000`, the process still shows as root owner but serves correctly. The EADDRINUSE noise in the log is from the stale port-3001 process (285403, jaytee, Apr13) still running — harmless but should be cleaned up. Consider setting up a systemd unit for the frontend to prevent this recurring (L3 carryover).
+- **L7 — `showCheck` tick was always visible when starred** — the real B3b bug was the tick *colour* (`slate-500` = near-invisible on dark bg) not its *presence*. Pre-reading the source caught this before writing wrong code.

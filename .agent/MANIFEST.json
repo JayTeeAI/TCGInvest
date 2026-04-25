@@ -1,0 +1,509 @@
+{
+  "meta": {
+    "generated_at": "2026-04-24T10:22:14Z",
+    "generated_by": "Claude Systems Architect \u2014 Init Protocol",
+    "version": "1.0.0",
+    "description": "Source of Truth snapshot for TCGInvest. Refresh with .agent/refresh.sh",
+    "last_refresh": "2026-04-24T10:22:14Z"
+  },
+  "servers": {
+    "hetzner": {
+      "alias": "hetzner",
+      "ip": "95.217.15.156",
+      "port": 2222,
+      "user": "jaytee",
+      "role": "production",
+      "hostname": "tcginvest.uk"
+    },
+    "paperclip": {
+      "alias": "paperclip",
+      "ip": "46.62.193.245",
+      "port": 2222,
+      "user": "jaytee",
+      "role": "preprod/automation/admin"
+    }
+  },
+  "tech_stack": {
+    "frontend": "Next.js 16 (App Router) + TypeScript + Tailwind CSS",
+    "backend": "FastAPI v3 (Python) \u2014 systemd tcginvest-api.service port 8000",
+    "database": "PostgreSQL 16 \u2014 db: tcginvest, user: tcginvest, port: 5432",
+    "auth": "Google OAuth 2.0 + JWT (HTTP-only cookie)",
+    "payments": "Stripe \u2014 \u00a33/month",
+    "ai_scoring": "Groq API \u2014 llama-3.3-70b-versatile",
+    "reverse_proxy": "nginx + Let's Encrypt",
+    "process_manager": "PM2 v6 (frontend), systemd (API)",
+    "automation": "n8n on paperclip (Docker, port 5678, Tailscale-only)"
+  },
+  "project_root": "/root/.openclaw",
+  "key_paths": {
+    "frontend": "/root/.openclaw/frontend/",
+    "backend": "/root/.openclaw/api/main.py",
+    "workspace_scripts": "/root/.openclaw/workspace/",
+    "etb_scripts": "/root/.openclaw/etb/",
+    "chase_scripts": "/root/.openclaw/chase/",
+    "ops_scripts": "/root/.openclaw/.claude/ops/",
+    "logs": "/root/.openclaw/logs/",
+    "venv": "/root/.openclaw/workspace/venv/bin/activate",
+    "agent_manifests": "/root/.openclaw/.agent/"
+  },
+  "frontend_routes": [
+    "/",
+    "/sets/[slug]",
+    "/etbs/[slug]",
+    "/tools/tracker",
+    "/tools/chase-cards",
+    "/tools/chase-cards/(card)",
+    "/tools/price-alerts",
+    "/tools/etb-tracker",
+    "/tools/roi-calculator",
+    "/account",
+    "/account/alerts",
+    "/account/preferences",
+    "/account/portfolio",
+    "/premium",
+    "/premium/success",
+    "/premium/cancel",
+    "/blog",
+    "/blog/[slug]",
+    "/auth/callback"
+  ],
+  "database": {
+    "name": "tcginvest",
+    "table_count": 19,
+    "tables": {
+      "sets": {
+        "owner": "postgres",
+        "size": "128 kB",
+        "columns": 18,
+        "purpose": "Core Pok\u00e9mon TCG set registry. Central FK target for BB/ETB/chase/scores data.",
+        "key_cols": [
+          "id",
+          "name",
+          "era",
+          "date_released",
+          "print_status",
+          "has_etb",
+          "tcgcsv_group_ids",
+          "tcgcsv_bb_product_id",
+          "tcgcsv_etb_product_id",
+          "logo_url",
+          "booster_img_url",
+          "etb_img_url"
+        ]
+      },
+      "tcgcsv_prices": {
+        "owner": "tcginvest",
+        "size": "2474 MB",
+        "columns": 9,
+        "purpose": "LARGEST TABLE. Raw daily price snapshots from TCGCSV (Feb 2024\u2013present). Source for momentum, movers, history. ~11.4M rows.",
+        "key_cols": [
+          "product_id",
+          "group_id",
+          "snapshot_date",
+          "market_price_usd",
+          "sub_type_name",
+          "inserted_at"
+        ],
+        "warning": "Do NOT add more raw price tables. All new price ingestion maps here."
+      },
+      "monthly_snapshots": {
+        "owner": "postgres",
+        "size": "208 kB",
+        "columns": 10,
+        "purpose": "BB price history per set, per run_date. Powers the Booster Box Tracker history chart.",
+        "key_cols": [
+          "set_id",
+          "run_date",
+          "bb_price_gbp",
+          "set_value_gbp",
+          "box_pct",
+          "price_source"
+        ]
+      },
+      "etbs": {
+        "owner": "postgres",
+        "size": "32 kB",
+        "columns": 21,
+        "purpose": "Elite Trainer Box registry \u2014 one row per ETB product.",
+        "key_cols": [
+          "id",
+          "set_id",
+          "name",
+          "msrp_gbp",
+          "pricecharting_slug",
+          "tcgcsv_product_id"
+        ]
+      },
+      "etb_price_snapshots": {
+        "owner": "postgres",
+        "size": "328 kB",
+        "columns": 14,
+        "purpose": "ETB price history. Mirrors monthly_snapshots pattern for ETBs.",
+        "key_cols": [
+          "etb_id",
+          "snapshot_date",
+          "ebay_avg_sold_gbp",
+          "sealed_premium_pct",
+          "raw_promo_gbp",
+          "psa10_promo_gbp"
+        ]
+      },
+      "chase_cards": {
+        "owner": "tcginvest",
+        "size": "184 kB",
+        "columns": 11,
+        "purpose": "Chase card registry \u2014 high-value individual cards per set.",
+        "key_cols": [
+          "id",
+          "set_id",
+          "card_name",
+          "card_number",
+          "rarity",
+          "pricecharting_slug",
+          "pc_path",
+          "pull_rate_per_box"
+        ]
+      },
+      "chase_card_prices": {
+        "owner": "tcginvest",
+        "size": "120 kB",
+        "columns": 10,
+        "purpose": "Daily chase card price snapshots from PriceCharting scrape (live from Apr 2026). No historical backfill possible.",
+        "key_cols": [
+          "chase_card_id",
+          "snapshot_date",
+          "raw_gbp",
+          "psa10_gbp",
+          "price_source"
+        ]
+      },
+      "set_heat_scores": {
+        "owner": "tcginvest",
+        "size": "72 kB",
+        "columns": 7,
+        "purpose": "Daily composite heat score per set. Derived from BB trend + chase trend + pull rate.",
+        "key_cols": [
+          "set_id",
+          "score_date",
+          "heat_score",
+          "bb_trend_score",
+          "chase_trend_score",
+          "pull_rate_score"
+        ]
+      },
+      "scores": {
+        "owner": "postgres",
+        "size": "64 kB",
+        "columns": 10,
+        "purpose": "AI investment recommendation scores per set per run_date (Groq).",
+        "key_cols": [
+          "set_id",
+          "run_date",
+          "recommendation",
+          "scarcity",
+          "liquidity",
+          "mascot_power",
+          "set_depth",
+          "decision_score"
+        ]
+      },
+      "users": {
+        "owner": "postgres",
+        "size": "64 kB",
+        "columns": 10,
+        "purpose": "User accounts (Google OAuth). Stripe customer ID stored here.",
+        "key_cols": [
+          "id",
+          "google_id",
+          "email",
+          "role",
+          "stripe_customer_id",
+          "digest_frequency"
+        ]
+      },
+      "watchlist": {
+        "owner": "postgres",
+        "size": "48 kB",
+        "columns": 7,
+        "purpose": "User BB/set watchlist. item_type discriminates set vs ETB.",
+        "key_cols": [
+          "user_id",
+          "item_type",
+          "item_id",
+          "set_name",
+          "bought"
+        ]
+      },
+      "etb_watchlist": {
+        "owner": "postgres",
+        "size": "56 kB",
+        "columns": 4,
+        "purpose": "ETB-specific watchlist (separate from watchlist table).",
+        "key_cols": [
+          "user_id",
+          "etb_id"
+        ]
+      },
+      "chase_watchlist": {
+        "owner": "tcginvest",
+        "size": "16 kB",
+        "columns": 4,
+        "purpose": "Chase card watchlist for weekly digest.",
+        "key_cols": [
+          "user_id",
+          "chase_card_id"
+        ]
+      },
+      "price_alerts": {
+        "owner": "postgres",
+        "size": "64 kB",
+        "columns": 9,
+        "purpose": "User-defined price alert thresholds. product_type discriminates BB vs ETB vs chase.",
+        "key_cols": [
+          "user_id",
+          "product_type",
+          "product_id",
+          "threshold_gbp",
+          "triggered",
+          "triggered_at"
+        ]
+      },
+      "portfolio_items": {
+        "owner": "tcginvest",
+        "size": "32 kB",
+        "columns": 11,
+        "purpose": "User portfolio tracking with purchase price and quantity.",
+        "key_cols": [
+          "user_id",
+          "product_type",
+          "product_id",
+          "purchase_price_gbp",
+          "quantity",
+          "deleted_at"
+        ]
+      },
+      "blog_posts": {
+        "owner": "tcginvest",
+        "size": "344 kB",
+        "columns": 12,
+        "purpose": "Blog content stored as Markdown. published flag gates public visibility.",
+        "key_cols": [
+          "slug",
+          "title",
+          "category",
+          "date",
+          "content_md",
+          "featured",
+          "published"
+        ]
+      },
+      "page_events": {
+        "owner": "postgres",
+        "size": "80 kB",
+        "columns": 8,
+        "purpose": "Anonymous analytics. metadata JSONB for flexible event payload.",
+        "key_cols": [
+          "user_id",
+          "session_id",
+          "page",
+          "action",
+          "metadata",
+          "ip_hash"
+        ]
+      },
+      "run_log": {
+        "owner": "postgres",
+        "size": "32 kB",
+        "columns": 9,
+        "purpose": "Pipeline execution audit log. One row per cron run.",
+        "key_cols": [
+          "run_date",
+          "sets_updated",
+          "sets_added",
+          "sets_scored",
+          "status",
+          "notes"
+        ]
+      },
+      "digest_log": {
+        "owner": "tcginvest",
+        "size": "24 kB",
+        "columns": 5,
+        "purpose": "Tracks when weekly digest emails were sent per user.",
+        "key_cols": [
+          "user_id",
+          "sent_at",
+          "sets_count",
+          "etbs_count"
+        ]
+      }
+    }
+  },
+  "cron_jobs": {
+    "hetzner": {
+      "source": "/etc/cron.d/tcginvest",
+      "jobs": [
+        {
+          "schedule": "0 9 * * 1",
+          "script": "workspace/first_run_v3.py",
+          "purpose": "BB pipeline \u2014 weekly Mon 09:00. Updates sets, prices, run_log."
+        },
+        {
+          "schedule": "30 9 * * 1",
+          "script": "workspace/score_sets.py",
+          "purpose": "AI scoring \u2014 weekly Mon 09:30. Writes to scores table. DEPENDS ON first_run_v3."
+        },
+        {
+          "schedule": "0 10 1 * *",
+          "script": "workspace/generate_blog_posts.py",
+          "purpose": "Blog post generator \u2014 monthly 1st 10:00. DEPENDS ON first_run_v3."
+        },
+        {
+          "schedule": "0 21 * * *",
+          "script": "workspace/tcgcsv_daily.py",
+          "purpose": "TCGCSV daily price ingestion \u2014 21:00. Writes to tcgcsv_prices. PRIMARY DATA SOURCE."
+        },
+        {
+          "schedule": "15 9 * * *",
+          "script": "workspace/check_alerts.py",
+          "purpose": "Price alerts checker \u2014 daily 09:15. Reads price_alerts, writes triggered flag."
+        },
+        {
+          "schedule": "15 9 * * *",
+          "script": "workspace/send_digest.py",
+          "purpose": "Watchlist digest email \u2014 daily 09:15. Gates internally by digest_frequency. Reads watchlist/etb_watchlist/chase_watchlist."
+        },
+        {
+          "schedule": "0 8 * * 0",
+          "script": "etb/run_etb_pipeline.py",
+          "purpose": "ETB pipeline \u2014 weekly Sun 08:00. Updates etbs, etb_price_snapshots."
+        },
+        {
+          "schedule": "0 6 * * *",
+          "script": "chase/fetch_prices_scrape.py",
+          "purpose": "Chase card scraper \u2014 daily 06:00. Writes to chase_card_prices. PriceCharting scrape."
+        },
+        {
+          "schedule": "0 22 * * *",
+          "script": "workspace/score_heat.py",
+          "purpose": "Heat score calculation \u2014 daily 22:00. Writes to set_heat_scores."
+        }
+      ]
+    },
+    "paperclip": {
+      "source": "crontab -l (user: jaytee)",
+      "jobs": [
+        {
+          "schedule": "0 */6 * * *",
+          "script": "~/sync-brain.sh",
+          "purpose": "Syncs CLAUDE.md from hetzner to paperclip every 6h."
+        },
+        {
+          "schedule": "*/5 * * * *",
+          "script": "~/github-runner/run.sh",
+          "purpose": "GitHub Actions self-hosted runner watchdog \u2014 restarts if dead."
+        }
+      ]
+    }
+  },
+  "n8n_workflows": {
+    "server": "paperclip",
+    "url": "http://100.107.74.24:5678",
+    "active_workflows": [
+      {
+        "id": "I7bD72jAzv0nyehI",
+        "name": "01 \u00b7 Ticket Intake \u2192 Discord",
+        "active": true
+      },
+      {
+        "id": "DOtgvnCHvRALrJVk",
+        "name": "02 \u00b7 Developer Agent \u00b7 Clarify",
+        "active": true
+      },
+      {
+        "id": "DwMFfSeOvNd5vVTG",
+        "name": "03 \u00b7 Developer Agent \u00b7 Design & Build",
+        "active": true
+      },
+      {
+        "id": "A6hXgUlDHYAEpX2Y",
+        "name": "04 \u00b7 Discord Command Router",
+        "active": true
+      },
+      {
+        "id": "P3SSyzgNVrY7iacs",
+        "name": "05 \u00b7 Production Deploy",
+        "active": true
+      },
+      {
+        "id": "2N2hCtMjlxvFI7SC",
+        "name": "Kanban - Portal: Delete Ticket",
+        "active": true
+      },
+      {
+        "id": "JA6pB6mGslXEku1x",
+        "name": "Kanban - Portal: Sprint Current",
+        "active": true
+      },
+      {
+        "id": "0rK2vCmc6jIl7FQm",
+        "name": "Kanban: List Tickets",
+        "active": true
+      },
+      {
+        "id": "K2KjEM8wcScQcqR7",
+        "name": "TCG - 00 Error Handler",
+        "active": true
+      },
+      {
+        "id": "f0i30kHjtkyWgYtB",
+        "name": "TCG - 11 Monday Sprint Planning",
+        "active": true
+      },
+      {
+        "id": "rP5ddYy7iq23iEVv",
+        "name": "TCG - 12 Friday Retro Agent",
+        "active": true
+      },
+      {
+        "id": "xkhzuEZkAkg8ugmG",
+        "name": "TCG - 13 Weekly Digest",
+        "active": true
+      },
+      {
+        "id": "4f2MbSumGaxiBH6k",
+        "name": "TCG-01 CI Result Handler",
+        "active": true
+      },
+      {
+        "id": "7VyHicCNE14n86XF",
+        "name": "TCG-04 Weekly Data Pipeline",
+        "active": true
+      },
+      {
+        "id": "e3KNTHMkRl7K5kjS",
+        "name": "TCG-05 Health Monitor",
+        "active": true
+      }
+    ],
+    "inactive_workflows": [
+      {
+        "id": "dCFZDtrEXZodGyWh",
+        "name": "My workflow",
+        "active": false
+      },
+      {
+        "id": "tcginvest-blog-weekly",
+        "name": "TCGInvest Weekly Blog Post Generator",
+        "active": false
+      }
+    ]
+  },
+  "schema_guard_rules": {
+    "rule_1_mapping_first": "NEVER create a new DB table without querying this manifest first. Map new data to existing structures where possible.",
+    "rule_2_cron_safety": "Before editing any pipeline script, check cron_jobs in this manifest for dependents. score_sets.py depends on first_run_v3.py. generate_blog_posts.py depends on first_run_v3.py.",
+    "rule_3_tcgcsv_prices": "tcgcsv_prices (2.4 GB, 11.4M rows) is the single source of truth for all raw price history. Do NOT create parallel price tables.",
+    "rule_4_watchlist_split": "Three separate watchlist tables exist by design: watchlist (BB/sets), etb_watchlist (ETBs), chase_watchlist (chase cards). This is intentional \u2014 do not merge.",
+    "rule_5_owner_split": "Some tables are owned by 'postgres' user, some by 'tcginvest'. This is a migration artefact. No functional difference but be aware when running DDL."
+  }
+}

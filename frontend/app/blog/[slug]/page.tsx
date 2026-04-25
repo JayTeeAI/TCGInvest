@@ -1,9 +1,7 @@
 import { notFound } from "next/navigation"
 import Link from "next/link"
-import { getPost } from "@/lib/blog/posts"
-import { MoverPostContent } from "@/components/blog/MoverPostContent"
-import { BBGuideContent } from "@/components/blog/BBGuideContent"
-import { ETBGuideContent } from "@/components/blog/ETBGuideContent"
+import ReactMarkdown from "react-markdown"
+import { fetchPost, fetchPosts } from "@/lib/blog/posts"
 import type { Metadata } from "next"
 
 export const revalidate = 3600
@@ -26,9 +24,8 @@ function formatDate(d: string): string {
 
 export async function generateMetadata({ params }: { params: Promise<{ slug: string }> }): Promise<Metadata> {
   const { slug } = await params
-  const post = getPost(slug)
+  const post = await fetchPost(slug)
   if (!post) return { title: "Post Not Found | TCG Invest" }
-
   return {
     title: post.title,
     description: post.description,
@@ -48,9 +45,14 @@ export async function generateMetadata({ params }: { params: Promise<{ slug: str
   }
 }
 
+export async function generateStaticParams() {
+  const posts = await fetchPosts(50)
+  return posts.map(p => ({ slug: p.slug }))
+}
+
 export default async function BlogPost({ params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params
-  const post = getPost(slug)
+  const post = await fetchPost(slug)
   if (!post) notFound()
 
   return (
@@ -83,15 +85,79 @@ export default async function BlogPost({ params }: { params: Promise<{ slug: str
           <div className="flex gap-3">
             <span className="text-amber-400 text-lg shrink-0">⚠</span>
             <p className="text-slate-500 text-xs leading-relaxed">
-              For informational purposes only. Data sourced from eBay UK sold listings and TCG Invest\'s monthly price pipeline. Not financial advice.
+              For informational purposes only. Data sourced from eBay UK sold listings and TCG Invest&apos;s price pipeline. Not financial advice.
             </p>
           </div>
         </div>
 
-        {/* Content — routed by slug */}
-        {slug === "pokemon-booster-box-movers-april-2026" && <MoverPostContent />}
-        {slug === "best-booster-boxes-to-hold-2026" && <BBGuideContent />}
-        {slug === "best-pokemon-centre-etbs-to-hold-2026" && <ETBGuideContent />}
+        {/* Markdown content */}
+        <div className="prose-blog">
+          <ReactMarkdown
+            components={{
+              h2: ({ children }) => (
+                <h2 className="text-xl font-bold text-white mt-10 mb-4">{children}</h2>
+              ),
+              h3: ({ children }) => (
+                <h3 className="text-lg font-semibold text-white mt-8 mb-3">{children}</h3>
+              ),
+              p: ({ children }) => (
+                <p className="text-slate-300 leading-relaxed mb-4">{children}</p>
+              ),
+              strong: ({ children }) => (
+                <strong className="text-slate-200 font-semibold">{children}</strong>
+              ),
+              em: ({ children }) => (
+                <em className="text-slate-400 italic">{children}</em>
+              ),
+              ul: ({ children }) => (
+                <ul className="list-disc list-inside space-y-1 text-slate-300 mb-4 ml-2">{children}</ul>
+              ),
+              ol: ({ children }) => (
+                <ol className="list-decimal list-inside space-y-1 text-slate-300 mb-4 ml-2">{children}</ol>
+              ),
+              li: ({ children }) => (
+                <li className="text-slate-300 leading-relaxed">{children}</li>
+              ),
+              blockquote: ({ children }) => (
+                <div className="bg-slate-900 border border-amber-500/20 rounded-xl p-4 my-6">
+                  <span className="text-amber-400 font-medium text-sm">📌 </span>
+                  <span className="text-slate-400 text-sm">{children}</span>
+                </div>
+              ),
+              table: ({ children }) => (
+                <div className="overflow-x-auto my-6 rounded-xl border border-slate-800">
+                  <table className="w-full text-sm">{children}</table>
+                </div>
+              ),
+              thead: ({ children }) => (
+                <thead className="bg-slate-900 text-slate-400 text-xs uppercase tracking-wider">{children}</thead>
+              ),
+              tbody: ({ children }) => (
+                <tbody className="divide-y divide-slate-800">{children}</tbody>
+              ),
+              tr: ({ children }) => (
+                <tr className="hover:bg-slate-900/50 transition-colors">{children}</tr>
+              ),
+              th: ({ children }) => (
+                <th className="px-4 py-3 text-left font-medium">{children}</th>
+              ),
+              td: ({ children }) => (
+                <td className="px-4 py-3 text-slate-300">{children}</td>
+              ),
+              hr: () => (
+                <hr className="border-slate-800 my-8" />
+              ),
+              a: ({ href, children }) => (
+                <a href={href} className="text-blue-400 hover:text-blue-300 underline underline-offset-2 transition-colors">{children}</a>
+              ),
+              code: ({ children }) => (
+                <code className="bg-slate-800 text-slate-200 rounded px-1.5 py-0.5 text-xs font-mono">{children}</code>
+              ),
+            }}
+          >
+            {post.content_md ?? ""}
+          </ReactMarkdown>
+        </div>
 
         {/* CTA */}
         <div className="mt-12 bg-slate-900 border border-slate-700 rounded-xl px-5 py-5 flex flex-wrap items-center justify-between gap-3">

@@ -1,4 +1,4 @@
-import { getSets, getSetHistory } from "@/lib/api"
+import { getSets, getSetHistory, getSetCardPriceHistory, getSetCardPriceHistoryDaily, getSetBBPriceHistoryDaily, getSetMomentum, getSetHeat } from "@/lib/api"
 import { getUser } from "@/lib/auth"
 import { Disclaimer } from "@/components/Disclaimer"
 import { SetPageClient } from "@/components/sets/SetPageClient"
@@ -87,7 +87,18 @@ export default async function SetPage({ params }: { params: Promise<{ slug: stri
   const set = sets.find((s: any) => toSlug(s.name) === slug)
   if (!set) notFound()
   const historyData = await getSetHistory(set.name).catch(() => ({ history: [] }))
+  const momentumData = await getSetMomentum(set.id).catch(() => null)
+  const bbMomentum = momentumData?.bb ?? null
+  const etbMomentum = momentumData?.etb ?? null
   const history = historyData.history || []
+  const sparseHistory = historyData.sparse === true
+  const heatData = isPremium ? await getSetHeat(set.id).catch(() => null) : null
+  const cardPriceData = await getSetCardPriceHistory(set.name).catch(() => ({ history: [] }))
+  const cardPriceHistory = cardPriceData.history || []
+  const cardPriceDailyData = await getSetCardPriceHistoryDaily(set.name).catch(() => ({ history: [] }))
+  const cardPriceDailyHistory = cardPriceDailyData.history || []
+  const bbDailyData = await getSetBBPriceHistoryDaily(set.id).catch(() => ({ history: [] }))
+  const bbDailyHistory = bbDailyData.history || []
   const chaseIsNumeric = set.top3_chase ? !isNaN(Number(set.top3_chase)) : true
   const chaseCards = (!chaseIsNumeric && set.top3_chase) ? set.top3_chase.split(", ") : []
 
@@ -181,7 +192,64 @@ export default async function SetPage({ params }: { params: Promise<{ slug: stri
               <p className="text-xs mb-1 opacity-70">AI Score</p>
               <p className="text-2xl font-bold">{set.decision_score ?? "—"}<span className="text-sm font-normal opacity-60"> / 20</span></p>
             </div>
+            {/* Heat Score — Premium gated */}
+            {isPremium && heatData ? (
+              <div className="rounded-xl p-4 bg-orange-950 border border-orange-700/50">
+                <p className="text-xs mb-1 text-orange-300/70">🔥 Heat Score</p>
+                <p className="text-2xl font-bold text-orange-300">
+                  {heatData.heat_score.toFixed(0)}<span className="text-sm font-normal opacity-60"> / 100</span>
+                </p>
+                <div className="mt-2 space-y-1">
+                  <div className="flex justify-between text-xs text-orange-200/60">
+                    <span>BB Trend</span><span>{heatData.bb_trend_score?.toFixed(0) ?? "—"}</span>
+                  </div>
+                  <div className="flex justify-between text-xs text-orange-200/60">
+                    <span>Chase Trend</span><span>{heatData.chase_trend_score?.toFixed(0) ?? "—"}</span>
+                  </div>
+                  <div className="flex justify-between text-xs text-orange-200/60">
+                    <span>Pull Rate</span><span>{heatData.pull_rate_score?.toFixed(0) ?? "—"}</span>
+                  </div>
+                </div>
+              </div>
+            ) : !isPremium ? (
+              <div className="rounded-xl p-4 bg-slate-900 border border-slate-700 relative overflow-hidden">
+                <p className="text-xs mb-1 text-slate-400">🔥 Heat Score</p>
+                <p className="text-2xl font-bold text-slate-600 blur-sm select-none">77 / 100</p>
+                <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-900/70 rounded-xl">
+                  <p className="text-xs text-slate-400 text-center px-2">Premium feature</p>
+                </div>
+              </div>
+            ) : null}
           </div>
+
+          {/* Momentum pills */}
+          {(bbMomentum || etbMomentum) && (
+            <div className="flex flex-wrap gap-2 mb-4 mt-2">
+              {bbMomentum?.d7_pct != null && (
+                <span className={`inline-flex items-center gap-1 text-xs font-medium px-3 py-1 rounded-full border ${bbMomentum.d7_pct > 0 ? 'bg-emerald-900/40 border-emerald-700/50 text-emerald-300' : bbMomentum.d7_pct < 0 ? 'bg-red-900/40 border-red-700/50 text-red-300' : 'bg-slate-800 border-slate-700 text-slate-400'}`}>
+                  BB 7d {bbMomentum.d7_pct > 0 ? '▲' : bbMomentum.d7_pct < 0 ? '▼' : ''} {bbMomentum.d7_pct > 0 ? '+' : ''}{bbMomentum.d7_pct.toFixed(1)}%
+                </span>
+              )}
+              {bbMomentum?.d30_pct != null && (
+                <span className={`inline-flex items-center gap-1 text-xs font-medium px-3 py-1 rounded-full border ${bbMomentum.d30_pct > 0 ? 'bg-emerald-900/40 border-emerald-700/50 text-emerald-300' : bbMomentum.d30_pct < 0 ? 'bg-red-900/40 border-red-700/50 text-red-300' : 'bg-slate-800 border-slate-700 text-slate-400'}`}>
+                  BB 30d {bbMomentum.d30_pct > 0 ? '▲' : bbMomentum.d30_pct < 0 ? '▼' : ''} {bbMomentum.d30_pct > 0 ? '+' : ''}{bbMomentum.d30_pct.toFixed(1)}%
+                </span>
+              )}
+              {etbMomentum?.d7_pct != null && (
+                <span className={`inline-flex items-center gap-1 text-xs font-medium px-3 py-1 rounded-full border ${etbMomentum.d7_pct > 0 ? 'bg-emerald-900/40 border-emerald-700/50 text-emerald-300' : etbMomentum.d7_pct < 0 ? 'bg-red-900/40 border-red-700/50 text-red-300' : 'bg-slate-800 border-slate-700 text-slate-400'}`}>
+                  ETB 7d {etbMomentum.d7_pct > 0 ? '▲' : etbMomentum.d7_pct < 0 ? '▼' : ''} {etbMomentum.d7_pct > 0 ? '+' : ''}{etbMomentum.d7_pct.toFixed(1)}%
+                </span>
+              )}
+              {etbMomentum?.d30_pct != null && (
+                <span className={`inline-flex items-center gap-1 text-xs font-medium px-3 py-1 rounded-full border ${etbMomentum.d30_pct > 0 ? 'bg-emerald-900/40 border-emerald-700/50 text-emerald-300' : etbMomentum.d30_pct < 0 ? 'bg-red-900/40 border-red-700/50 text-red-300' : 'bg-slate-800 border-slate-700 text-slate-400'}`}>
+                  ETB 30d {etbMomentum.d30_pct > 0 ? '▲' : etbMomentum.d30_pct < 0 ? '▼' : ''} {etbMomentum.d30_pct > 0 ? '+' : ''}{etbMomentum.d30_pct.toFixed(1)}%
+                </span>
+              )}
+              {bbMomentum?.d7_pct == null && bbMomentum?.d30_pct == null && etbMomentum?.d7_pct == null && etbMomentum?.d30_pct == null && (
+                <span className="text-slate-600 text-xs">Momentum data not yet available for this set</span>
+              )}
+            </div>
+          )}
 
           {set.bb_price_gbp && (
             <SetAlertButton
@@ -270,7 +338,7 @@ export default async function SetPage({ params }: { params: Promise<{ slug: stri
           <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 mb-6">
             <h2 className="text-slate-200 font-semibold mb-4">Price History</h2>
             {user ? (
-              <SetPageClient history={history} setName={set.name} />
+              <SetPageClient history={history} cardPriceHistory={cardPriceHistory} cardPriceDailyHistory={cardPriceDailyHistory} bbDailyHistory={bbDailyHistory} setName={set.name} sparseHistory={sparseHistory} />
             ) : (
               <div className="text-center py-8">
                 <p className="text-slate-400 text-sm mb-3">Sign in free to view price history charts</p>

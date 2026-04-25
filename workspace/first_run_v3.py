@@ -411,6 +411,46 @@ def find_booster_box_price(set_name, dawnglare_prices):
 
     return None, "NOT FOUND"
 
+
+# ── TCGCSV fallback price lookup ──────────────────────────────────────────────
+def fetch_tcgcsv_bb_price(set_name, rate, pg_conn):
+    """
+    Fallback: look up booster box price from tcgcsv_prices via tcgcsv_bb_product_id.
+    Used when Dawnglare returns None for a set. Returns (gbp_price, source_label) or (None, None).
+    Cron safety: read-only query — does not affect score_sets.py or generate_blog_posts.py.
+    """
+    if not pg_conn or not DATABASE_URL:
+        return None, None
+    try:
+        import psycopg2.extras as _pge
+        cur = pg_conn.cursor(cursor_factory=_pge.RealDictCursor)
+        # Look up the tcgcsv_bb_product_id for this set
+        cur.execute(
+            "SELECT tcgcsv_bb_product_id FROM sets WHERE name = %s",
+            (set_name,)
+        )
+        row = cur.fetchone()
+        if not row or not row["tcgcsv_bb_product_id"]:
+            return None, None
+        pid = row["tcgcsv_bb_product_id"]
+        # Get latest price from tcgcsv_prices
+        cur.execute("""
+            SELECT market_price_usd
+            FROM tcgcsv_prices
+            WHERE product_id = %s AND sub_type_name = 'Normal' AND market_price_usd IS NOT NULL
+            ORDER BY snapshot_date DESC
+            LIMIT 1
+        """, (pid,))
+        price_row = cur.fetchone()
+        if not price_row:
+            return None, None
+        usd = float(price_row["market_price_usd"])
+        gbp = round(usd * rate, 2)
+        return gbp, "tcgcsv"
+    except Exception as e:
+        print(f"    [WARN] TCGCSV fallback failed for {set_name}: {e}")
+        return None, None
+
 # ── PokemonWizard ─────────────────────────────────────────────────────────────
 def fetch_wizard_index():
     print("  Fetching PokemonWizard set index ...")
@@ -1025,6 +1065,15 @@ def main():
     dawnglare    = fetch_dawnglare_prices()
     wizard_index = fetch_wizard_index()
 
+    # Open Postgres connection for TCGCSV fallback (read-only)
+    _pg_fallback = None
+    if DATABASE_URL:
+        try:
+            _pg_fallback = psycopg2.connect(DATABASE_URL)
+            print("  Postgres fallback connection: OK")
+        except Exception as _e:
+            print(f"  [WARN] Postgres fallback connection failed: {_e}")
+
     print("\n[5/9] Era backfill ...")
     backfill_era(ws, sh, wizard_index)
 
@@ -1058,12 +1107,21 @@ def main():
 
         usd_price, note = find_booster_box_price(set_name, dawnglare)
         gbp = None
+        price_source_override = None
         if usd_price is not None:
             gbp = round(usd_price * rate, 2)
             updates.append((i, COL["bb_price"], gbp))
             print(f"    D: {gbp:.2f} [{note}]")
         else:
-            print(f"    D: NOT FOUND")
+            print(f"    D: NOT FOUND — trying TCGCSV fallback ...")
+            gbp_fallback, fallback_src = fetch_tcgcsv_bb_price(set_name, rate, _pg_fallback)
+            if gbp_fallback is not None:
+                gbp = gbp_fallback
+                price_source_override = "tcgcsv"
+                updates.append((i, COL["bb_price"], gbp))
+                print(f"    D: {gbp:.2f} [tcgcsv fallback]")
+            else:
+                print(f"    D: NOT FOUND (no fallback available)")
 
         wizard_entry  = find_wizard_entry(set_name, wizard_index)
         set_value_gbp = None
@@ -1106,6 +1164,7 @@ def main():
             "box_pct":      f"{box_pct:.1%}"   if box_pct   else "",
             "chase_pct":    f"{chase_pct:.2f}" if chase_pct else "",
             "print_status": row[COL["print_status"]-1] if len(row) > COL["print_status"]-1 else "",
+            "price_source_override": price_source_override,
         })
 
     print(f"\n  Writing {len(updates)} cell updates ...")
@@ -1166,8 +1225,15 @@ def main():
     # ── Write to SQLite ───────────────────────────────────────────────────────
     print(f"\n[9/9] Writing to SQLite ...")
     run_date    = today.strftime("%Y-%m-%d")
+    if _pg_fallback:
+        try:
+            _pg_fallback.close()
+        except Exception:
+            pass
+
     sqlite_rows = []
     for item in score_queue:
+        src = item.get("price_source_override") or "dawnglare+wizard"
         sqlite_rows.append({
             "name":          item["name"],
             "era":           item["era"],
@@ -1178,7 +1244,7 @@ def main():
             "top3_chase":    item["chase"],
             "box_pct":       item["box_pct"],
             "chase_pct":     item["chase_pct"],
-            "price_source":  "dawnglare+wizard",
+            "price_source":  src,
         })
 
     write_to_sqlite(run_date, rate, sqlite_rows, sqlite_score_results, len(new_sets))
